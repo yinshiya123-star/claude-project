@@ -1,0 +1,46 @@
+# 推送 v* 标签（例如 v1.0.0）时：运行测试，把 deepseek-subtitle/ 打包成 zip 并发布到 Releases
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        working-directory: deepseek-subtitle
+        run: |
+          pip install -r requirements.txt pytest httpx
+          pytest -q
+
+      - name: Build zip
+        run: |
+          rm -rf deepseek-subtitle/tests
+          # zip keeps the executable bit of start.sh / 启动-Mac.command
+          zip -r "deepseek-subtitle-${GITHUB_REF_NAME}.zip" deepseek-subtitle -x '*/__pycache__/*' '*/.pytest_cache/*'
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: deepseek-subtitle-${{ github.ref_name }}.zip
+          generate_release_notes: true
+          body: |
+            ## 下载使用
+
+            下载下面的 `deepseek-subtitle-${{ github.ref_name }}.zip`，解压后：
+
+            - **Windows**：安装 Python 3.12（勾选 Add python.exe to PATH），双击 `启动.bat`
+            - **macOS**：安装 Python 3.12，双击 `启动-Mac.command`（首次被拦截：右键 → 打开）
+            - **Linux**：运行 `./start.sh`
+
+            第一次运行会自动安装依赖，然后打开浏览器 http://localhost:8000 。
