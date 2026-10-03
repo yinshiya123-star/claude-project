@@ -35,10 +35,18 @@ jobs:
           pytest -q
 
       - name: Build zip
+        # Python's zipfile stores non-ASCII names as UTF-8 and keeps the executable
+        # bit; the runner's zip wrote 启动.bat as "#U542f#U52a8.bat".
         run: |
-          rm -rf deepseek-subtitle/tests
-          # zip keeps the executable bit of start.sh / 启动-Mac.command
-          zip -r "deepseek-subtitle-${VERSION}.zip" deepseek-subtitle -x '*/__pycache__/*' '*/.pytest_cache/*'
+          python - <<'PY'
+          import os, zipfile
+          version = os.environ["VERSION"]
+          with zipfile.ZipFile(f"deepseek-subtitle-{version}.zip", "w", zipfile.ZIP_DEFLATED) as z:
+              for root, dirs, files in os.walk("deepseek-subtitle"):
+                  dirs[:] = sorted(d for d in dirs if d not in ("tests", "__pycache__", ".pytest_cache"))
+                  for name in sorted(files):
+                      z.write(os.path.join(root, name))
+          PY
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -46,6 +54,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: deepseek-subtitle-${{ env.VERSION }}.zip
           generate_release_notes: true
+          overwrite_files: true
           body: |
             ## 下载使用
 
