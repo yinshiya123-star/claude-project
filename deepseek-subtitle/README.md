@@ -20,6 +20,15 @@
 
 ## 快速开始
 
+### Windows：双击启动
+
+1. 安装 [Python 3.12](https://www.python.org/downloads/release/python-3128/)，安装时勾选 **Add python.exe to PATH**；
+2. 双击 `deepseek-subtitle` 文件夹里的 **`启动.bat`**。
+
+第一次运行会自动安装依赖（使用国内镜像），然后启动服务并打开浏览器。以后每次双击就能直接用。使用期间不要关闭黑色窗口。
+
+### 手动启动
+
 需要 Python 3.10+。
 
 ```bash
