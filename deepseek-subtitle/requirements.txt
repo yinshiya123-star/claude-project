@@ -3,4 +3,6 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 openai>=1.30
 faster-whisper>=1.0
+# PyAV 19 removed open(metadata_errors=...), which faster-whisper 1.2.1 still passes
+av<19
 python-dotenv>=1.0
