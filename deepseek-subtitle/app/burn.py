@@ -12,6 +12,7 @@ import subprocess
 from functools import lru_cache
 from typing import Callable
 
+from .media import AudioTrack
 from .subtitles import Segment, cue_lines
 
 # Common CJK-capable system fonts, tried in order (override with SUBTITLE_FONT).
@@ -200,7 +201,6 @@ def burn(
 ) -> None:
     import av
     import numpy as np
-    from av.audio.resampler import AudioResampler
 
     # Output size must be known before anything is muxed: writing the first
     # packet opens every encoder, after which the size can't change.
@@ -227,12 +227,7 @@ def burn(
             renderer = SubtitleRenderer(vout.width, vout.height)
             last_pts = -1
 
-            aout = resampler = None
-            if ain is not None:
-                aout = out.add_stream("aac", rate=48000)
-                aout.bit_rate = 192000
-                aout.layout = "stereo"
-                resampler = AudioResampler(format=aout.format.name, layout="stereo", rate=48000)
+            audio = AudioTrack(out, "aac", 48000, 192000) if ain is not None else None
 
             def encode_video(rgb, t):
                 nonlocal last_pts
@@ -250,11 +245,6 @@ def burn(
                 if on_progress and duration:
                     on_progress(min(1.0, t / duration))
 
-            def encode_audio(frame):
-                for f in resampler.resample(frame):
-                    for packet in aout.encode(f):
-                        out.mux(packet)
-
             streams = [s for s in (vin, ain) if s is not None]  # vin is None for audio-only
             for packet in inp.demux(*streams):
                 try:
@@ -268,7 +258,7 @@ def burn(
                         rgb = _rotate(frame.to_ndarray(format="rgb24"), getattr(frame, "rotation", 0))
                         encode_video(rgb, float(frame.time))
                     else:
-                        encode_audio(frame)
+                        audio.add(frame)
 
             if vin is None:
                 # Audio-only: a black picture for the whole duration.
@@ -278,9 +268,7 @@ def burn(
 
             for packet in vout.encode(None):
                 out.mux(packet)
-            if aout is not None:
-                encode_audio(None)
-                for packet in aout.encode(None):
-                    out.mux(packet)
+            if audio is not None:
+                audio.add(None)
     if on_progress:
         on_progress(1.0)

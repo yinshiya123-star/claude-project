@@ -344,3 +344,46 @@ def test_burn_api(monkeypatch, tmp_path):
     assert job["burn"]["mode"] == "zh"
     r = client.get(f"/api/jobs/{job_id}/burned.mp4")
     assert r.content == b"video:zh" and "a.zh.subtitled.mp4" in r.headers["content-disposition"]
+
+
+def _audio_frame(pts, rate=48000, samples=1024):
+    from fractions import Fraction
+
+    import av
+    import numpy as np
+
+    f = av.AudioFrame.from_ndarray(np.zeros((1, samples), dtype=np.float32), format="fltp", layout="mono")
+    f.sample_rate, f.pts, f.time_base = rate, pts, Fraction(1, rate)
+    return f
+
+
+def test_audio_track_survives_backward_timestamps(tmp_path):
+    """Source audio whose timestamps step back used to fail with 'Invalid argument ... 22'."""
+    import av
+
+    from app.media import AudioTrack
+
+    out_path = tmp_path / "a.mp4"
+    with av.open(str(out_path), "w", format="mp4") as out:
+        track = AudioTrack(out, "aac", 48000, 128000)
+        for pts in (0, 1024, 2048, 1024, 3072):
+            track.add(_audio_frame(pts))
+        track.add(None)
+    with av.open(str(out_path)) as c:
+        assert c.streams.audio[0].frames > 0 or c.duration
+
+
+def test_audio_track_keeps_late_start(tmp_path):
+    import av
+
+    from app.media import AudioTrack
+
+    out_path = tmp_path / "late.mp4"
+    with av.open(str(out_path), "w", format="mp4") as out:
+        track = AudioTrack(out, "aac", 48000, 128000)
+        for i in range(20):
+            track.add(_audio_frame(72000 + i * 1024))  # audio starts at 1.5 s
+        track.add(None)
+    with av.open(str(out_path)) as c:
+        first = next(p for p in c.demux(audio=0) if p.pts is not None)
+        assert abs(float(first.pts * first.time_base) - 1.5) < 0.1

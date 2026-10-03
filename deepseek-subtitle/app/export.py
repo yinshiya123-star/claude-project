@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from .media import AudioTrack
 from .subtitles import Segment, cue_lines, to_lrc
 
 ID3_LANG = {"bilingual": "zho", "zh": "zho", "en": "eng", "orig": "zho"}
@@ -13,22 +14,15 @@ ID3_LANG = {"bilingual": "zho", "zh": "zho", "en": "eng", "orig": "zho"}
 def convert_to_mp3(src: str, dst: str) -> None:
     """Re-encode the audio track of any media file to 192 kbps stereo MP3."""
     import av
-    from av.audio.resampler import AudioResampler
 
     with av.open(src) as inp:
         if not inp.streams.audio:
             raise RuntimeError("文件里没有音轨，无法导出 MP3")
         with av.open(dst, "w", format="mp3") as out:
-            stream = out.add_stream("libmp3lame", rate=44100)
-            stream.bit_rate = 192000
-            stream.layout = "stereo"
-            resampler = AudioResampler(format=stream.format.name, layout="stereo", rate=44100)
+            track = AudioTrack(out, "libmp3lame", 44100, 192000)
             for frame in inp.decode(audio=0):
-                for f in resampler.resample(frame):
-                    out.mux(stream.encode(f))
-            for f in resampler.resample(None):
-                out.mux(stream.encode(f))
-            out.mux(stream.encode(None))
+                track.add(frame)
+            track.add(None)
 
 
 def write_lyrics(mp3_path: str, segments: list[Segment], mode: str, title: str) -> None:

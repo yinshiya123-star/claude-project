@@ -21,6 +21,7 @@ load_dotenv()
 from . import transcriber, translator  # noqa: E402  (env must be loaded first)
 from .burn import burn  # noqa: E402
 from .export import export_mp3  # noqa: E402
+from .media import log_ffmpeg_errors  # noqa: E402
 from .subtitles import Segment, to_lrc, to_srt, to_vtt  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -32,6 +33,7 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 ALLOWED_EXT = {".mp3", ".mp4", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".webm", ".mov", ".mkv"}
 
 app = FastAPI(title="DeepSeek 中英字幕生成器")
+log_ffmpeg_errors()
 
 # Whisper is CPU/GPU heavy: process one job at a time.
 executor = ThreadPoolExecutor(max_workers=1)
