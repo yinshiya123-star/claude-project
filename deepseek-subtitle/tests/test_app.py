@@ -110,3 +110,50 @@ def test_decode_audio(tmp_path):
     assert audio.dtype.name == "float32"
     assert abs(len(audio) - 16000) < 100  # 1 s resampled to 16 kHz mono
     assert 0.2 < abs(audio).max() < 0.3  # amplitude 8000/32768 preserved
+
+
+class FakeWhisper:
+    """Stands in for faster_whisper.WhisperModel; CUDA fails like a missing cuBLAS."""
+
+    created = []
+
+    def __init__(self, name, device, compute_type):
+        self.device = device
+        FakeWhisper.created.append((device, compute_type))
+
+    def transcribe(self, audio, **kwargs):
+        if self.device == "cuda":
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        seg = SimpleNamespace(start=0.0, end=1.0, text=" hi ")
+        return iter([seg]), SimpleNamespace(duration=1.0, language="en")
+
+
+def _patch_whisper(monkeypatch):
+    import faster_whisper
+
+    from app import transcriber
+
+    FakeWhisper.created = []
+    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeWhisper)
+    monkeypatch.setattr(transcriber, "_models", {})
+    monkeypatch.setattr(transcriber, "_cuda_failed", False)
+    monkeypatch.setattr(transcriber, "decode_audio", lambda path: [0.0])
+    return transcriber
+
+
+def test_cpu_is_default(monkeypatch):
+    transcriber = _patch_whisper(monkeypatch)
+    monkeypatch.delenv("WHISPER_DEVICE", raising=False)
+    segs, lang = transcriber.transcribe("x.mp3")
+    assert [s.text for s in segs] == ["hi"] and lang == "en"
+    assert FakeWhisper.created == [("cpu", "int8")]
+
+
+def test_gpu_failure_falls_back_to_cpu(monkeypatch):
+    transcriber = _patch_whisper(monkeypatch)
+    monkeypatch.setenv("WHISPER_DEVICE", "cuda")
+    segs, _ = transcriber.transcribe("x.mp3")
+    assert [s.text for s in segs] == ["hi"]
+    assert [d for d, _ in FakeWhisper.created] == ["cuda", "cpu"]
+    transcriber.transcribe("x.mp3")  # later jobs skip the broken GPU
+    assert [d for d, _ in FakeWhisper.created] == ["cuda", "cpu"]

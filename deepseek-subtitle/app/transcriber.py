@@ -6,29 +6,49 @@ resulting timed segments are handed to DeepSeek for translation.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Callable
 
 from .subtitles import Segment
 
-_model = None
+log = logging.getLogger(__name__)
+
+_models: dict[str, object] = {}
 _model_lock = threading.Lock()
+_cuda_failed = False
 
 
-def _get_model():
-    global _model
+def _get_model(device: str):
     with _model_lock:
-        if _model is None:
+        if device not in _models:
             from faster_whisper import WhisperModel
 
             name = os.getenv("WHISPER_MODEL", "small")
-            device = os.getenv("WHISPER_DEVICE", "auto")
-            compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "default")
-            if compute_type == "default":
-                compute_type = "int8" if device == "cpu" else "default"
-            _model = WhisperModel(name, device=device, compute_type=compute_type)
-        return _model
+            compute_type = os.getenv("WHISPER_COMPUTE_TYPE") or ("int8" if device == "cpu" else "default")
+            _models[device] = WhisperModel(name, device=device, compute_type=compute_type)
+        return _models[device]
+
+
+def _cuda_available() -> bool:
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
+def _devices() -> list[str]:
+    """Devices to try in order. CPU is the default: running on an NVIDIA GPU also
+    needs the CUDA 12 / cuDNN 9 libraries, which most machines don't have."""
+    pref = os.getenv("WHISPER_DEVICE", "cpu").lower()
+    if pref == "cpu" or _cuda_failed:
+        return ["cpu"]
+    if pref == "cuda" or _cuda_available():
+        return ["cuda", "cpu"]
+    return ["cpu"]
 
 
 def decode_audio(path: str, sampling_rate: int = 16000):
@@ -68,9 +88,23 @@ def transcribe(
     on_progress: Callable[[float], None] | None = None,
 ) -> tuple[list[Segment], str]:
     """Transcribe an audio/video file. Returns (segments, detected_language)."""
-    model = _get_model()
+    global _cuda_failed
+    audio = decode_audio(path)
+    for device in _devices():
+        try:
+            return _transcribe(_get_model(device), audio, language, on_progress)
+        except Exception:
+            if device != "cuda":
+                raise
+            # e.g. "Library cublas64_12.dll is not found": GPU libraries missing.
+            log.warning("GPU transcription failed, falling back to CPU", exc_info=True)
+            _cuda_failed = True
+    raise AssertionError("unreachable")  # the CPU attempt either returns or raises
+
+
+def _transcribe(model, audio, language, on_progress) -> tuple[list[Segment], str]:
     seg_iter, info = model.transcribe(
-        decode_audio(path),
+        audio,
         language=language or None,
         vad_filter=True,
         beam_size=5,

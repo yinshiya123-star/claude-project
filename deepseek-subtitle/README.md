@@ -56,7 +56,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 翻译用的模型 |
 | `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`，越大越准越慢 |
-| `WHISPER_DEVICE` | `auto` | `cpu` / `cuda` / `auto` |
+| `WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto`。用 NVIDIA 显卡加速需另装 CUDA 12 和 cuDNN 9，GPU 出错时会自动退回 CPU |
 | `MAX_UPLOAD_MB` | `500` | 上传大小上限 |
 
 ## API
