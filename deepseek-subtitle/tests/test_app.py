@@ -88,3 +88,25 @@ def test_full_job_flow(monkeypatch, tmp_path):
     assert "attachment" in srt.headers["content-disposition"]
     assert client.get(f"/api/jobs/{job_id}/media").content == b"fake-audio"
     assert "中英字幕生成器" in client.get("/").text
+
+
+def test_decode_audio(tmp_path):
+    import math
+    import struct
+    import wave
+
+    from app.transcriber import decode_audio
+
+    path = tmp_path / "tone.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"".join(
+            struct.pack("<hh", v, v)
+            for v in (int(8000 * math.sin(2 * math.pi * 440 * i / 44100)) for i in range(44100))
+        ))
+    audio = decode_audio(str(path))
+    assert audio.dtype.name == "float32"
+    assert abs(len(audio) - 16000) < 100  # 1 s resampled to 16 kHz mono
+    assert 0.2 < abs(audio).max() < 0.3  # amplitude 8000/32768 preserved

@@ -31,6 +31,37 @@ def _get_model():
         return _model
 
 
+def decode_audio(path: str, sampling_rate: int = 16000):
+    """Decode any audio/video file to mono float32 PCM at `sampling_rate`.
+
+    faster-whisper ships its own decoder, but it passes `metadata_errors` to
+    av.open(), which PyAV 19 removed. Decoding here keeps every PyAV version working.
+    """
+    import av
+    import numpy as np
+
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=sampling_rate)
+    chunks = []
+    with av.open(path, mode="r") as container:
+        if not container.streams.audio:
+            raise RuntimeError("文件里没有音轨，无法识别语音")
+        frames = container.decode(audio=0)
+        while True:
+            try:
+                frame = next(frames)
+            except StopIteration:
+                break
+            except av.error.InvalidDataError:
+                continue  # skip corrupt frames instead of failing the whole file
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray())
+        for out in resampler.resample(None):
+            chunks.append(out.to_ndarray())
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks, axis=1).reshape(-1).astype(np.float32) / 32768.0
+
+
 def transcribe(
     path: str,
     language: str | None = None,
@@ -39,7 +70,7 @@ def transcribe(
     """Transcribe an audio/video file. Returns (segments, detected_language)."""
     model = _get_model()
     seg_iter, info = model.transcribe(
-        path,
+        decode_audio(path),
         language=language or None,
         vad_filter=True,
         beam_size=5,
