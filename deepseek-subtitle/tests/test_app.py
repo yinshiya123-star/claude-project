@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -233,3 +234,113 @@ def test_zh_target_works_without_key(monkeypatch, tmp_path):
     assert seen["language"] == "zh" and job["target"] == "zh"
     assert job["segments"][0]["zh"] == "大家好"
     assert client.get(f"/api/jobs/{job_id}/subtitle.lrc?mode=zh").text == "[00:00.00]大家好\n[00:02.00]\n"
+
+
+def test_active_segment_and_wrap():
+    from app.burn import _ActiveSegment, _wrap
+
+    segs = [Segment(1, 1.0, 2.0, "a"), Segment(2, 3.0, 4.0, "b")]
+    tracker = _ActiveSegment(segs)
+    assert [getattr(tracker.at(t), "id", None) for t in (0.5, 1.5, 2.5, 3.5, 4.5)] == [None, 1, None, 2, None]
+    assert tracker.at(1.2).id == 1  # time going backwards (seek) still works
+
+    font = SimpleNamespace(getlength=len)  # 1 unit per character
+    assert _wrap("hello big world", font, 9) == ["hello big", "world"]
+    assert _wrap("一二三四五六七", font, 3) == ["一二三", "四五六", "七"]
+
+
+def _make_media(tmp_path, args, name):
+    import subprocess
+
+    import pytest
+
+    from app.burn import find_font
+
+    try:
+        find_font()
+    except RuntimeError:
+        pytest.skip("no CJK font installed")
+    path = tmp_path / name
+    try:
+        subprocess.run(["ffmpeg", "-loglevel", "error", *args, str(path)], check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("ffmpeg not available to create a test file")
+    return path
+
+
+def _frame_at(path, t):
+    import av
+
+    with av.open(str(path)) as c:
+        for frame in c.decode(video=0):
+            if frame.time >= t:
+                return frame.to_ndarray(format="rgb24")
+
+
+def test_burn_video_draws_subtitles(tmp_path):
+    import av
+
+    from app.burn import burn
+
+    src = _make_media(tmp_path, [
+        "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=3:r=10",
+        "-f", "lavfi", "-i", "sine=duration=3", "-shortest", "-pix_fmt", "yuv420p",
+    ], "in.mp4")
+    out = tmp_path / "out.mp4"
+    progress = []
+    burn(str(src), str(out), [Segment(1, 1.0, 2.0, "x", zh="你好", en="Hello")], "bilingual", progress.append)
+    with av.open(str(out)) as c:
+        assert (c.streams.video[0].width, c.streams.video[0].height) == (320, 240)
+        assert c.streams.audio, "audio track kept"
+    bottom = slice(150, 240)
+    before, during = _frame_at(out, 0.5)[bottom], _frame_at(out, 1.5)[bottom]
+    assert abs(before.astype(int) - during.astype(int)).max() > 100  # white text appeared
+    assert progress[-1] == 1.0
+
+
+def test_burn_audio_only_makes_black_video(tmp_path):
+    import av
+
+    from app.burn import AUDIO_ONLY_SIZE, burn
+
+    src = _make_media(tmp_path, ["-f", "lavfi", "-i", "sine=duration=2"], "in.mp3")
+    out = tmp_path / "out.mp4"
+    burn(str(src), str(out), [Segment(1, 0.2, 1.8, "x", zh="只有声音")], "zh")
+    with av.open(str(out)) as c:
+        v = c.streams.video[0]
+        assert (v.width, v.height) == AUDIO_ONLY_SIZE
+    frame = _frame_at(out, 1.0)
+    assert frame[:300].max() < 30 and frame[600:].max() > 200  # black picture, white subtitle at the bottom
+
+
+def test_burn_api(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main, "EXPORT_DIR", tmp_path / "exports")
+    monkeypatch.setattr(main.transcriber, "transcribe",
+                        lambda path, language=None, on_progress=None: ([Segment(1, 0, 1, "hi")], "en"))
+    monkeypatch.setattr(main.translator, "translate", lambda segments, **kw: segments)
+
+    def fake_burn(src, dst, segments, mode, on_progress=None):
+        on_progress(0.5)
+        Path(dst).write_bytes(b"video:" + mode.encode())
+
+    monkeypatch.setattr(main, "burn", fake_burn)
+    client = TestClient(main.app)
+    job_id = client.post("/api/jobs", files={"file": ("a.mp4", b"x")}, data={"api_key": "k"}).json()["id"]
+
+    def wait(pred):
+        for _ in range(50):
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if pred(job):
+                return job
+            time.sleep(0.05)
+        raise AssertionError(job)
+
+    wait(lambda j: j["status"] == "done")
+    assert client.get(f"/api/jobs/{job_id}/burned.mp4").status_code == 409  # not burned yet
+    assert client.post(f"/api/jobs/{job_id}/burn", json={"mode": "bad"}).status_code == 400
+    assert client.post(f"/api/jobs/{job_id}/burn", json={"mode": "zh"}).status_code == 200
+    job = wait(lambda j: j["burn"]["status"] == "done")
+    assert job["burn"]["mode"] == "zh"
+    r = client.get(f"/api/jobs/{job_id}/burned.mp4")
+    assert r.content == b"video:zh" and "a.zh.subtitled.mp4" in r.headers["content-disposition"]

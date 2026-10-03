@@ -1,6 +1,6 @@
 # DeepSeek 中英字幕生成器
 
-上传 MP3 / MP4 等音视频文件，自动生成**中英双语字幕**或**中文字幕**，在网页中预览、编辑，并下载字幕文件或带字幕的 MP3。
+上传 MP3 / MP4 等音视频文件，自动生成**中英双语字幕**或**中文字幕**，在网页中预览、编辑，并下载字幕文件、带字幕的 MP3，或把字幕烧录进视频。
 
 ## 工作流程
 
@@ -18,6 +18,7 @@
 - 外语视频额外提供 **原文 + 中文** 字幕
 - 网页内播放器实时显示字幕，可切换字幕类型；字幕列表可点击跳转、直接编辑
 - 下载 **SRT / VTT 字幕**、**LRC 歌词**，以及 **带字幕 MP3**：字幕作为歌词写进 MP3，手机和音乐播放器播放时可显示；上传视频会先转成 MP3
+- **烧录字幕到视频**：把字幕直接画进画面（硬字幕），导出 MP4，任何播放器和视频网站都能看到。纯音频会生成黑底视频；手机竖拍的视频会按正确方向处理。使用系统自带的中文字体（Windows 微软雅黑、macOS 苹方、Linux Noto CJK / 文泉驿），不需要另装 ffmpeg。1080p 视频在 4 核 CPU 上大约是实时速度（1 分钟视频约 1 分钟）
 
 ## 快速开始
 
@@ -71,6 +72,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`，越大越准越慢 |
 | `WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto`。用 NVIDIA 显卡加速需另装 CUDA 12 和 cuDNN 9，GPU 出错时会自动退回 CPU |
 | `MAX_UPLOAD_MB` | `500` | 上传大小上限 |
+| `SUBTITLE_FONT` | 自动查找 | 烧录字幕用的字体文件路径，例如 `C:/Windows/Fonts/simhei.ttf` |
 
 ## API
 
@@ -81,6 +83,8 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `PUT` | `/api/jobs/{id}/segments` | 保存编辑后的字幕 |
 | `GET` | `/api/jobs/{id}/subtitle.srt`、`.vtt` 或 `.lrc`，参数 `mode=bilingual/zh/en/orig` | 获取字幕文件（加 `&download=true` 下载） |
 | `GET` | `/api/jobs/{id}/export.mp3?mode=...` | 下载带字幕（ID3 歌词）的 MP3 |
+| `POST` | `/api/jobs/{id}/burn`，JSON `{"mode": "bilingual"}` | 开始把字幕烧录进视频；进度在任务详情的 `burn` 字段 |
+| `GET` | `/api/jobs/{id}/burned.mp4` | 下载烧录好的视频 |
 | `GET` | `/api/jobs/{id}/media` | 原始音视频 |
 
 ## 项目结构
@@ -92,6 +96,7 @@ app/
   translator.py   DeepSeek 批量翻译 / 中文校对（JSON 输出、带上下文、失败重试）
   subtitles.py    SRT / VTT / LRC 生成
   export.py       导出带字幕（ID3 歌词）的 MP3
+  burn.py         把字幕烧录进视频（PyAV 解码 / 编码 + Pillow 绘制字幕）
 static/           网页界面（原生 HTML/CSS/JS）
 tests/            单元测试（pytest）
 启动.bat          Windows 一键启动

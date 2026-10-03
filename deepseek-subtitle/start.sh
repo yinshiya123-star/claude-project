@@ -5,7 +5,7 @@ set -u
 cd "$(dirname "$0")"
 
 URL="http://localhost:8000"
-DEPS="import fastapi, uvicorn, multipart, openai, faster_whisper, dotenv, mutagen"
+DEPS="import fastapi, uvicorn, multipart, openai, faster_whisper, dotenv, mutagen, PIL"
 
 pause() { read -r -p "按回车键退出..." _ || true; }
 fail() { echo; echo "[错误] $1"; echo; pause; exit 1; }

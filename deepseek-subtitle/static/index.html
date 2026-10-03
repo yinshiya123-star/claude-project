@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>中英字幕生成器</h1>
-    <p class="sub">上传音频 / 视频 → Whisper 语音识别（支持多国语言）→ DeepSeek 翻译 / 校对 → 中英双语或中文字幕，可导出带字幕 MP3</p>
+    <p class="sub">上传音频 / 视频 → Whisper 语音识别（支持多国语言）→ DeepSeek 翻译 / 校对 → 中英双语或中文字幕，可导出带字幕 MP3、烧录进视频</p>
   </header>
 
   <main>
@@ -86,6 +86,20 @@
       <div class="downloads">
         <div class="dl-title">下载 <small>（"带字幕 MP3"把字幕作为歌词写进 MP3，手机和播放器播放时可显示；视频会先转成 MP3）</small></div>
         <table id="dl-table"></table>
+      </div>
+
+      <div class="burn">
+        <div class="dl-title">烧录字幕到视频 <small>（把字幕直接画进画面，任何播放器、视频网站都能看到；纯音频会生成黑底视频）</small></div>
+        <div class="burn-row">
+          <select id="burn-mode"></select>
+          <button id="burn-btn" class="secondary">开始烧录</button>
+          <a id="burn-download" hidden>下载烧录好的视频</a>
+        </div>
+        <div id="burn-progress" hidden>
+          <div class="progress-head"><span id="burn-stage">烧录中</span><span id="burn-percent">0%</span></div>
+          <div class="bar"><div id="burn-fill"></div></div>
+        </div>
+        <p id="burn-error" class="error" hidden></p>
       </div>
 
       <div class="table-head">

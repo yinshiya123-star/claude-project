@@ -19,6 +19,7 @@ from pydantic import BaseModel
 load_dotenv()
 
 from . import transcriber, translator  # noqa: E402  (env must be loaded first)
+from .burn import burn  # noqa: E402
 from .export import export_mp3  # noqa: E402
 from .subtitles import Segment, to_lrc, to_srt, to_vtt  # noqa: E402
 
@@ -37,6 +38,8 @@ executor = ThreadPoolExecutor(max_workers=1)
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 export_lock = threading.Lock()
+# Burning re-encodes the whole video: run one at a time, apart from transcription.
+burn_executor = ThreadPoolExecutor(max_workers=1)
 MODES = ("bilingual", "zh", "en", "orig")
 SUBTITLE_TYPES = {"srt": "application/x-subrip", "vtt": "text/vtt", "lrc": "text/plain"}
 
@@ -137,6 +140,7 @@ async def create_job(
             "language": None,
             "segments": [],
             "error": None,
+            "burn": None,
             "created_at": time.time(),
         }
     executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target)
@@ -204,6 +208,49 @@ def download_mp3(job_id: str, mode: str = "bilingual"):
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     return FileResponse(path, media_type="audio/mpeg", headers={"Content-Disposition": _attachment(job, mode, "mp3")})
+
+
+class BurnRequest(BaseModel):
+    mode: str = "bilingual"
+
+
+def _run_burn(job_id: str, media_path: str, segments: list[Segment], mode: str, dst: Path) -> None:
+    def progress(p: float) -> None:
+        _update(job_id, burn={"status": "running", "mode": mode, "progress": round(p, 3), "error": None})
+
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(".part.mp4")
+        burn(media_path, str(tmp), segments, mode, on_progress=progress)
+        tmp.replace(dst)
+        _update(job_id, burn={"status": "done", "mode": mode, "progress": 1.0, "error": None})
+    except Exception as e:
+        _update(job_id, burn={"status": "error", "mode": mode, "progress": 0.0, "error": str(e)})
+
+
+@app.post("/api/jobs/{job_id}/burn")
+def start_burn(job_id: str, body: BurnRequest):
+    """Burn the subtitles into the video (audio-only files get a black picture)."""
+    _check_mode(body.mode)
+    job, segments = _segments(job_id)
+    with jobs_lock:
+        if (jobs[job_id].get("burn") or {}).get("status") == "running":
+            raise HTTPException(409, "正在烧录中，请等待完成")
+        jobs[job_id]["burn"] = {"status": "running", "mode": body.mode, "progress": 0.0, "error": None}
+    dst = EXPORT_DIR / f"{job_id}.burned.mp4"
+    burn_executor.submit(_run_burn, job_id, job["media_path"], segments, body.mode, dst)
+    return {"ok": True}
+
+
+@app.get("/api/jobs/{job_id}/burned.mp4")
+def download_burned(job_id: str):
+    job = _get_job(job_id)
+    state = job.get("burn") or {}
+    path = EXPORT_DIR / f"{job_id}.burned.mp4"
+    if state.get("status") != "done" or not path.exists():
+        raise HTTPException(409, "视频还没有烧录完成")
+    headers = {"Content-Disposition": _attachment(job, state["mode"], "subtitled.mp4")}
+    return FileResponse(path, media_type="video/mp4", headers=headers)
 
 
 def _check_mode(mode: str) -> None:

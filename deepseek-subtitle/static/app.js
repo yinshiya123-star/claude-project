@@ -169,6 +169,7 @@ function showResult(data) {
   mode = availableModes()[0];
   renderModeToggle();
   renderDownloads();
+  renderBurn();
   renderList();
   renderCues();
 }
@@ -281,6 +282,71 @@ async function onDownload(e, a, fmt) {
     a.classList.remove("busy");
   }
 }
+
+// ---- Burn subtitles into the video ----
+const burnBtn = $("#burn-btn");
+let burnTimer = null;
+
+function renderBurn() {
+  const select = $("#burn-mode");
+  select.innerHTML = "";
+  for (const m of availableModes()) select.add(new Option(MODE_LABELS[m], m));
+  clearTimeout(burnTimer);
+  showBurnState(job.burn);
+  if (job.burn && job.burn.status === "running") pollBurn();
+}
+
+function showBurnState(state) {
+  const status = state ? state.status : "idle";
+  burnBtn.disabled = status === "running";
+  $("#burn-progress").hidden = status !== "running";
+  if (status === "running") {
+    const p = state.progress || 0;
+    $("#burn-stage").textContent = `烧录中（${MODE_LABELS[state.mode]}），视频越长越慢，请耐心等待`;
+    $("#burn-percent").textContent = `${Math.round(p * 100)}%`;
+    $("#burn-fill").style.width = `${p * 100}%`;
+  }
+  const link = $("#burn-download");
+  link.hidden = status !== "done";
+  if (status === "done") {
+    link.href = `/api/jobs/${jobId}/burned.mp4`;
+    link.textContent = `下载烧录好的视频（${MODE_LABELS[state.mode]}）`;
+  }
+  showError($("#burn-error"), status === "error" ? `烧录失败：${state.error}` : "");
+}
+
+async function pollBurn() {
+  const current = jobId;
+  try {
+    const data = await (await fetch(`/api/jobs/${current}`)).json();
+    if (current !== jobId) return; // a new file was uploaded meanwhile
+    job.burn = data.burn;
+    showBurnState(data.burn);
+    if (data.burn && data.burn.status === "running") burnTimer = setTimeout(pollBurn, 1500);
+  } catch {
+    burnTimer = setTimeout(pollBurn, 3000);
+  }
+}
+
+burnBtn.addEventListener("click", async () => {
+  if (dirty && !(await save())) return; // burn what the user sees
+  burnBtn.disabled = true;
+  const burnMode = $("#burn-mode").value;
+  const res = await fetch(`/api/jobs/${jobId}/burn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: burnMode }),
+  });
+  if (!res.ok) {
+    let msg = `烧录失败（${res.status}）`;
+    try { msg = (await res.json()).detail || msg; } catch {}
+    showError($("#burn-error"), msg);
+    burnBtn.disabled = false;
+    return;
+  }
+  showBurnState({ status: "running", mode: burnMode, progress: 0 });
+  pollBurn();
+});
 
 function fmtTime(t) {
   const m = Math.floor(t / 60);
