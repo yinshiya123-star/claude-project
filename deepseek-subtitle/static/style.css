@@ -1,0 +1,112 @@
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #1d2129;
+  --muted: #6b7280;
+  --border: #e3e5ea;
+  --accent: #4d6bfe;
+  --accent-soft: #eef1ff;
+  --error: #d93025;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318;
+    --card: #1b1e25;
+    --text: #e6e8ec;
+    --muted: #9aa0ab;
+    --border: #2c3039;
+    --accent: #7b93ff;
+    --accent-soft: #252b44;
+    --error: #ff6b5e;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+header { text-align: center; padding: 36px 16px 8px; }
+h1 { margin: 0; font-size: 28px; }
+.sub { color: var(--muted); margin: 6px 0 0; }
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+#dropzone {
+  display: block;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 36px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+#dropzone:hover, #dropzone.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop-icon { font-size: 32px; color: var(--accent); }
+#drop-text { font-weight: 600; margin-top: 4px; word-break: break-all; }
+.hint { color: var(--muted); font-size: 13px; }
+
+.options { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+.options label { display: flex; flex-direction: column; font-size: 13px; color: var(--muted); gap: 4px; }
+.options .grow { flex: 1; min-width: 220px; }
+select, input[type=password] {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 18px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.secondary { background: var(--accent-soft); color: var(--accent); padding: 6px 14px; }
+#start-btn { width: 100%; font-weight: 600; }
+.error { color: var(--error); margin: 10px 0 0; white-space: pre-wrap; }
+
+.progress-head { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+#bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+
+.player-wrap { background: #000; border-radius: 10px; overflow: hidden; }
+video { width: 100%; max-height: 60vh; display: block; }
+video.audio-only { height: 160px; }
+video::cue { font-size: 18px; line-height: 1.4; background: rgba(0,0,0,.65); }
+
+.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 14px 0; flex-wrap: wrap; }
+.seg-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg-toggle button { background: transparent; color: var(--text); border-radius: 0; padding: 6px 14px; }
+.seg-toggle button.active { background: var(--accent); color: #fff; }
+.downloads { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+.downloads span { color: var(--muted); }
+.downloads a { color: var(--accent); text-decoration: none; cursor: pointer; }
+.downloads a:hover { text-decoration: underline; }
+
+.table-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.table-head small { color: var(--muted); }
+#segments { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow-y: auto; border-top: 1px solid var(--border); }
+#segments li { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 10px 6px; border-bottom: 1px solid var(--border); }
+#segments li.current { background: var(--accent-soft); }
+.time { white-space: nowrap; color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: 13px; cursor: pointer; padding-top: 2px; }
+.texts div[contenteditable] { outline: none; border-radius: 4px; padding: 1px 4px; }
+.texts div[contenteditable]:focus { background: var(--bg); box-shadow: 0 0 0 1px var(--accent); }
+.texts .en { color: var(--muted); font-size: 14px; }
+
+@media (max-width: 560px) {
+  #segments li { grid-template-columns: 1fr; gap: 2px; }
+}
