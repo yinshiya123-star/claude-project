@@ -19,6 +19,10 @@ _models: dict[str, object] = {}
 _model_lock = threading.Lock()
 _cuda_failed = False
 
+# Whisper often writes Mandarin in traditional characters without punctuation;
+# a simplified, punctuated prompt sentence steers it towards that style.
+ZH_INITIAL_PROMPT = "以下是普通话的句子，使用简体中文，并带有标点符号。"
+
 
 def _get_model(device: str):
     with _model_lock:
@@ -106,6 +110,9 @@ def _transcribe(model, audio, language, on_progress) -> tuple[list[Segment], str
     seg_iter, info = model.transcribe(
         audio,
         language=language or None,
+        initial_prompt=ZH_INITIAL_PROMPT if language == "zh" else None,
+        # Auto mode: detect the language per segment, so mixed-language audio works.
+        multilingual=language is None,
         vad_filter=True,
         beam_size=5,
     )

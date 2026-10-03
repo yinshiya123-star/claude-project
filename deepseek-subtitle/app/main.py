@@ -19,12 +19,14 @@ from pydantic import BaseModel
 load_dotenv()
 
 from . import transcriber, translator  # noqa: E402  (env must be loaded first)
-from .subtitles import Segment, to_srt, to_vtt  # noqa: E402
+from .export import export_mp3  # noqa: E402
+from .subtitles import Segment, to_lrc, to_srt, to_vtt  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "data" / "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_DIR = UPLOAD_DIR.parent / "exports"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 ALLOWED_EXT = {".mp3", ".mp4", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".webm", ".mov", ".mkv"}
 
@@ -34,6 +36,9 @@ app = FastAPI(title="DeepSeek 中英字幕生成器")
 executor = ThreadPoolExecutor(max_workers=1)
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
+export_lock = threading.Lock()
+MODES = ("bilingual", "zh", "en", "orig")
+SUBTITLE_TYPES = {"srt": "application/x-subrip", "vtt": "text/vtt", "lrc": "text/plain"}
 
 
 def _update(job_id: str, **fields) -> None:
@@ -49,7 +54,11 @@ def _get_job(job_id: str) -> dict:
         return dict(job)
 
 
-def _run_job(job_id: str, path: str, language: str | None, api_key: str | None) -> None:
+def _has_key(api_key: str | None) -> bool:
+    return bool(api_key or os.getenv("DEEPSEEK_API_KEY"))
+
+
+def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, target: str) -> None:
     try:
         _update(job_id, status="transcribing", stage="语音识别中（首次运行需下载模型）", progress=0.0)
         segments, lang = transcriber.transcribe(
@@ -61,12 +70,19 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None) 
         if not segments:
             raise RuntimeError("没有识别到任何语音")
 
-        _update(job_id, status="translating", stage="DeepSeek 翻译中", progress=0.6)
-        translator.translate(
-            segments,
-            api_key=api_key,
-            on_progress=lambda p: _update(job_id, progress=round(0.6 + p * 0.4, 3)),
-        )
+        if target == "zh" and not _has_key(api_key):
+            # Chinese-only without a key: use the recognised text as is.
+            for seg in segments:
+                seg.zh, seg.en = seg.text, ""
+        else:
+            stage = "DeepSeek 校对中" if target == "zh" else "DeepSeek 翻译中"
+            _update(job_id, status="translating", stage=stage, progress=0.6)
+            translator.translate(
+                segments,
+                api_key=api_key,
+                on_progress=lambda p: _update(job_id, progress=round(0.6 + p * 0.4, 3)),
+                target=target,
+            )
         _update(
             job_id,
             status="done",
@@ -84,7 +100,14 @@ async def create_job(
     file: UploadFile = File(...),
     language: str = Form(""),
     api_key: str = Form(""),
+    target: str = Form("bilingual"),
 ):
+    if target not in ("bilingual", "zh"):
+        raise HTTPException(400, "target 只支持 bilingual / zh")
+    if target == "zh":
+        language = "zh"  # Chinese audio -> Chinese subtitles
+    elif not _has_key(api_key.strip()):
+        raise HTTPException(400, "请填写 DeepSeek API Key，或在服务端 .env 中配置 DEEPSEEK_API_KEY")
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"不支持的文件格式 {ext or '(无扩展名)'}，支持: {', '.join(sorted(ALLOWED_EXT))}")
@@ -101,14 +124,11 @@ async def create_job(
                 raise HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限")
             out.write(chunk)
 
-    if not (api_key.strip() or os.getenv("DEEPSEEK_API_KEY")):
-        dest.unlink(missing_ok=True)
-        raise HTTPException(400, "请填写 DeepSeek API Key，或在服务端 .env 中配置 DEEPSEEK_API_KEY")
-
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
             "filename": file.filename,
+            "target": target,
             "media_path": str(dest),
             "media_type": file.content_type or "",
             "status": "queued",
@@ -119,7 +139,7 @@ async def create_job(
             "error": None,
             "created_at": time.time(),
         }
-    executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None)
+    executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target)
     return {"id": job_id}
 
 
@@ -145,7 +165,7 @@ def update_segments(job_id: str, body: SegmentsUpdate):
         seg = by_id.get(edit.get("id"))
         if seg is None:
             continue
-        for key in ("zh", "en"):
+        for key in ("text", "zh", "en"):
             if isinstance(edit.get(key), str):
                 seg[key] = edit[key]
     _update(job_id, segments=list(by_id.values()))
@@ -161,19 +181,39 @@ def _segments(job_id: str) -> tuple[dict, list[Segment]]:
 
 @app.get("/api/jobs/{job_id}/subtitle.{fmt}")
 def download_subtitle(job_id: str, fmt: str, mode: str = "bilingual", download: bool = False):
-    if fmt not in ("srt", "vtt"):
-        raise HTTPException(400, "格式只支持 srt / vtt")
-    if mode not in ("bilingual", "zh", "en"):
-        raise HTTPException(400, "mode 只支持 bilingual / zh / en")
+    if fmt not in SUBTITLE_TYPES:
+        raise HTTPException(400, "格式只支持 srt / vtt / lrc")
+    _check_mode(mode)
     job, segments = _segments(job_id)
-    content = to_srt(segments, mode) if fmt == "srt" else to_vtt(segments, mode)
+    content = {"srt": to_srt, "vtt": to_vtt, "lrc": to_lrc}[fmt](segments, mode)
     headers = {}
     if download:
-        stem = Path(job["filename"] or job_id).stem
-        filename = f"{stem}.{mode}.{fmt}"
-        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
-    media_type = "text/vtt" if fmt == "vtt" else "application/x-subrip"
-    return PlainTextResponse(content, media_type=f"{media_type}; charset=utf-8", headers=headers)
+        headers["Content-Disposition"] = _attachment(job, mode, fmt)
+    return PlainTextResponse(content, media_type=f"{SUBTITLE_TYPES[fmt]}; charset=utf-8", headers=headers)
+
+
+@app.get("/api/jobs/{job_id}/export.mp3")
+def download_mp3(job_id: str, mode: str = "bilingual"):
+    """MP3 with the subtitles embedded as ID3 lyrics (videos are converted to MP3)."""
+    _check_mode(mode)
+    job, segments = _segments(job_id)
+    title = Path(job["filename"] or job_id).stem
+    try:
+        with export_lock:
+            path = export_mp3(job["media_path"], EXPORT_DIR, job_id, segments, mode, title)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    return FileResponse(path, media_type="audio/mpeg", headers={"Content-Disposition": _attachment(job, mode, "mp3")})
+
+
+def _check_mode(mode: str) -> None:
+    if mode not in MODES:
+        raise HTTPException(400, "mode 只支持 bilingual / zh / en / orig")
+
+
+def _attachment(job: dict, mode: str, ext: str) -> str:
+    stem = Path(job["filename"] or job["id"]).stem
+    return f"attachment; filename*=UTF-8''{quote(f'{stem}.{mode}.{ext}')}"
 
 
 @app.get("/api/jobs/{job_id}/media")

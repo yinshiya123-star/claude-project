@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app import main, translator
-from app.subtitles import Segment, to_srt, to_vtt
+from app.subtitles import Segment, to_lrc, to_srt, to_vtt
 
 
 def _segs():
@@ -62,7 +62,7 @@ def test_full_job_flow(monkeypatch, tmp_path):
         lambda path, language=None, on_progress=None: ([Segment(1, 0, 2, "Hello")], "en"),
     )
 
-    def fake_translate(segments, api_key=None, on_progress=None):
+    def fake_translate(segments, api_key=None, on_progress=None, target="bilingual"):
         segments[0].zh, segments[0].en = "你好", "Hello"
         return segments
 
@@ -157,3 +157,79 @@ def test_gpu_failure_falls_back_to_cpu(monkeypatch):
     assert [d for d, _ in FakeWhisper.created] == ["cuda", "cpu"]
     transcriber.transcribe("x.mp3")  # later jobs skip the broken GPU
     assert [d for d, _ in FakeWhisper.created] == ["cuda", "cpu"]
+
+
+def test_lrc_and_orig_mode():
+    segs = [
+        Segment(1, 1.0, 2.0, "こんにちは", zh="你好", en="Hello"),
+        Segment(2, 2.2, 3.5, "さようなら", zh="再见", en="Goodbye"),
+    ]
+    assert to_lrc(segs) == (
+        "[00:01.00]你好\n[00:01.00]Hello\n"
+        "[00:02.20]再见\n[00:02.20]Goodbye\n[00:03.50]\n"  # gap < 1 s: no blank after line 1
+    )
+    assert to_lrc(segs, "orig").startswith("[00:01.00]こんにちは\n[00:01.00]你好\n")
+    assert "こんにちは\n你好" in to_srt(segs, "orig")
+
+
+def test_translate_zh_target_only_proofreads(monkeypatch):
+    fake = FakeClient()
+    fake.calls = 1  # skip the dropped-line first response
+    monkeypatch.setattr(translator, "make_client", lambda key=None: fake)
+    segs = [Segment(1, 0, 1, "今天天气很好")]
+    translator.translate(segs, target="zh")
+    assert segs[0].zh == "中今天天气很好" and segs[0].en == ""
+
+
+def test_export_mp3_embeds_lyrics(tmp_path):
+    import subprocess
+
+    import pytest
+
+    from mutagen.id3 import ID3
+
+    from app.export import export_mp3
+
+    src = tmp_path / "in.wav"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", str(src)],
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("ffmpeg not available to create a test file")
+    segs = [Segment(1, 0.5, 2.0, "Hello", zh="你好", en="Hello")]
+    out = export_mp3(str(src), tmp_path / "exports", "job1", segs, "bilingual", "演示")
+    tags = ID3(out)
+    assert tags.getall("USLT")[0].text == "[00:00.50]你好\n[00:00.50]Hello\n[00:02.00]\n"
+    assert tags.getall("SYLT")[0].text == [("你好\nHello", 500)]
+    assert str(tags["TIT2"]) == "演示"
+    assert tags.version[:2] == (2, 3)
+    assert (tmp_path / "exports" / "job1.mp3").exists()  # converted audio is cached
+
+
+def test_zh_target_works_without_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    seen = {}
+
+    def fake_transcribe(path, language=None, on_progress=None):
+        seen["language"] = language
+        return [Segment(1, 0, 2, "大家好")], "zh"
+
+    monkeypatch.setattr(main.transcriber, "transcribe", fake_transcribe)
+    client = TestClient(main.app)
+
+    r = client.post("/api/jobs", files={"file": ("a.mp3", b"x")}, data={"target": "bilingual"})
+    assert r.status_code == 400  # bilingual still needs a key
+
+    job_id = client.post("/api/jobs", files={"file": ("a.mp3", b"x")}, data={"target": "zh"}).json()["id"]
+    for _ in range(50):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "done", job
+    assert seen["language"] == "zh" and job["target"] == "zh"
+    assert job["segments"][0]["zh"] == "大家好"
+    assert client.get(f"/api/jobs/{job_id}/subtitle.lrc?mode=zh").text == "[00:00.00]大家好\n[00:02.00]\n"

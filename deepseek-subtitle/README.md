@@ -1,31 +1,44 @@
 # DeepSeek 中英字幕生成器
 
-上传 MP3 / MP4 等音视频文件，自动生成**中英双语字幕**，并在网页中预览、编辑和下载。
+上传 MP3 / MP4 等音视频文件，自动生成**中英双语字幕**或**中文字幕**，在网页中预览、编辑，并下载字幕文件或带字幕的 MP3。
 
 ## 工作流程
 
 ```
-音视频文件 ──► faster-whisper 本地语音识别（带时间轴） ──► DeepSeek API 翻译/校对 ──► 中英双语字幕
+音视频文件 ──► faster-whisper 本地语音识别（带时间轴，支持多国语言） ──► DeepSeek 翻译 / 校对 ──► 字幕
 ```
 
-> DeepSeek API 只支持文本，不能直接处理音频，所以先用开源的 Whisper 模型在本地把语音转成带时间轴的文字，再交给 DeepSeek 结合上下文翻译成中文和英文（同时修正明显的识别错误）。
+> DeepSeek API 只支持文本，不能直接处理音频，所以先用开源的 Whisper 模型在本地把语音转成带时间轴的文字，再交给 DeepSeek 结合上下文翻译（同时修正明显的识别错误）。
 
 ## 功能
 
-- 拖拽上传 mp3、mp4、m4a、wav、mov、mkv 等格式，显示上传和处理进度
-- 自动检测原始语言（也可手动指定中文 / 英文 / 日语 / 韩语）
-- 网页内播放器实时显示字幕，可切换 **双语 / 中文 / 英文**
-- 字幕列表：点击时间跳转、播放时自动高亮当前行、可直接编辑文本
-- 下载 双语 SRT、中文 SRT、英文 SRT、双语 VTT
+- **中英双语**：中文转双语、英文转双语，日语、韩语、法语等外语也能转成中英双语
+- **仅中文**：中文音视频转中文字幕。填写 DeepSeek Key 后会校对错别字和标点，不填也能用
+- **自动识别多国语言**：不用手动选择语言；同一个视频里混着几种语言也能逐段识别。也可以手动指定 20 种常用语言
+- 外语视频额外提供 **原文 + 中文** 字幕
+- 网页内播放器实时显示字幕，可切换字幕类型；字幕列表可点击跳转、直接编辑
+- 下载 **SRT / VTT 字幕**、**LRC 歌词**，以及 **带字幕 MP3**：字幕作为歌词写进 MP3，手机和音乐播放器播放时可显示；上传视频会先转成 MP3
 
 ## 快速开始
 
-### Windows：双击启动
+最简单的方式：在 [Releases](https://github.com/yinshiya123-star/claude-project/releases) 下载最新的 `deepseek-subtitle-*.zip`，解压后按你的系统双击启动脚本。第一次运行会自动安装依赖（优先使用国内镜像），然后启动服务并打开浏览器；以后每次直接启动即可。使用期间不要关闭命令行窗口。
+
+### Windows
 
 1. 安装 [Python 3.12](https://www.python.org/downloads/release/python-3128/)，安装时勾选 **Add python.exe to PATH**；
-2. 双击 `deepseek-subtitle` 文件夹里的 **`启动.bat`**。
+2. 双击 **`启动.bat`**。
 
-第一次运行会自动安装依赖（使用国内镜像），然后启动服务并打开浏览器。以后每次双击就能直接用。使用期间不要关闭黑色窗口。
+### macOS
+
+1. 安装 [Python 3.12](https://www.python.org/downloads/macos/)；
+2. 双击 **`启动-Mac.command`**。第一次如果提示"无法验证开发者"，请右键点击它 → 打开 → 打开。
+
+### Linux
+
+```bash
+sudo apt install python3 python3-venv   # Ubuntu / Debian，没装过才需要
+./start.sh
+```
 
 ### 手动启动
 
@@ -52,7 +65,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | – | DeepSeek API Key；不配置时需在网页中填写 |
+| `DEEPSEEK_API_KEY` | – | DeepSeek API Key；不配置时需在网页中填写（"仅中文"模式可不填） |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 翻译用的模型 |
 | `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`，越大越准越慢 |
@@ -63,10 +76,11 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/jobs` | 上传文件（表单字段 `file`，可选 `language`、`api_key`），返回任务 `id` |
+| `POST` | `/api/jobs` | 上传文件（表单字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`），返回任务 `id` |
 | `GET` | `/api/jobs/{id}` | 查询进度与字幕内容 |
 | `PUT` | `/api/jobs/{id}/segments` | 保存编辑后的字幕 |
-| `GET` | `/api/jobs/{id}/subtitle.srt` 或 `.vtt`，参数 `mode=bilingual/zh/en` | 获取字幕文件（加 `&download=true` 下载） |
+| `GET` | `/api/jobs/{id}/subtitle.srt`、`.vtt` 或 `.lrc`，参数 `mode=bilingual/zh/en/orig` | 获取字幕文件（加 `&download=true` 下载） |
+| `GET` | `/api/jobs/{id}/export.mp3?mode=...` | 下载带字幕（ID3 歌词）的 MP3 |
 | `GET` | `/api/jobs/{id}/media` | 原始音视频 |
 
 ## 项目结构
@@ -74,11 +88,15 @@ export HF_ENDPOINT=https://hf-mirror.com
 ```
 app/
   main.py         FastAPI 服务、任务队列、接口
-  transcriber.py  faster-whisper 语音识别
-  translator.py   DeepSeek 批量翻译（JSON 输出、带上下文、失败重试）
-  subtitles.py    SRT / VTT 生成
+  transcriber.py  音频解码、faster-whisper 语音识别（GPU 出错自动退回 CPU）
+  translator.py   DeepSeek 批量翻译 / 中文校对（JSON 输出、带上下文、失败重试）
+  subtitles.py    SRT / VTT / LRC 生成
+  export.py       导出带字幕（ID3 歌词）的 MP3
 static/           网页界面（原生 HTML/CSS/JS）
 tests/            单元测试（pytest）
+启动.bat          Windows 一键启动
+启动-Mac.command  macOS 一键启动
+start.sh          macOS / Linux 一键启动
 ```
 
 ## 说明
