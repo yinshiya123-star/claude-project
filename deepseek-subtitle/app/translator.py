@@ -31,8 +31,8 @@ from .subtitles import Segment
 
 CHUNK_CHARS = 600  # VideoLingo: split_chunks_by_chars(chunk_size=600, max_i=10)
 CHUNK_LINES = 10
-CONTEXT_BEFORE = 3
-CONTEXT_AFTER = 2
+CONTEXT_BEFORE = 5
+CONTEXT_AFTER = 3
 SUMMARY_CHARS = 8000
 MAX_TERMS = 15
 MAX_RETRIES = 2
@@ -137,6 +137,12 @@ def _numbered(lines: list[str], fields: dict[str, str]) -> str:
     )
 
 
+SPLIT_NOTE = ("Subtitle lines are often parts of one sentence that was split for timing: read the lines "
+              "around each one to understand the whole sentence, then translate each part on its own line, "
+              "in the same order, so every line still matches what is said at that moment. "
+              "Never move content between lines, never merge or drop lines.")
+
+
 def faithfulness_prompt(lines: list[str], src_lang: str, target: str, shared: str) -> str:
     return f"""
 ## Role
@@ -149,6 +155,7 @@ We have a segment of original subtitles that need to be directly translated into
 1. Translate the original subtitles into {target} line by line
 2. Ensure the translation is faithful to the original, accurately conveying the original meaning
 3. Consider the context and professional terminology
+4. {SPLIT_NOTE}
 
 {shared}
 
@@ -156,6 +163,7 @@ We have a segment of original subtitles that need to be directly translated into
 1. Faithful to the original: Accurately convey the content and meaning of the original text, without arbitrarily changing, adding, or omitting content.
 2. Accurate terminology: Use professional terms correctly and maintain consistency in terminology.
 3. Understand the context: Fully comprehend and reflect the background and contextual relationships of the text.
+4. Recognition errors: the original comes from speech recognition. If a word makes no sense, translate what the speaker most plausibly said given the context; never invent content that is not there.
 </translation_principles>
 
 ## INPUT
@@ -190,6 +198,8 @@ Your task is to reflect on and improve these direct translations to create more 
 3. Perform free translation based on your analysis
 4. Do not add comments or explanations in the translation, as the subtitles are for the audience to read
 5. Do not leave empty lines in the free translation, as the subtitles are for the audience to read
+6. The meaning must stay exactly that of the original: improve wording only. If the direct translation is already accurate and natural, keep it as it is
+7. {SPLIT_NOTE}
 
 {shared}
 
@@ -225,7 +235,7 @@ You are a professional {src_lang} proofreader who fixes automatic recognition ou
 
 ## Task
 The lines below come from automatic speech recognition or OCR. Correct them line by line into the "fixed" field, in the original language:
-1. Fix misheard words, homophones, typos and wrong names using the context, the summary and the terms
+1. Fix misheard words, homophones, typos and wrong names using the context, the summary and the terms; change a word only when it is clearly wrong in context
 2. Fix punctuation and capitalization
 3. {chinese}Keep each line in its own language; do not translate
 4. Do not rewrite, expand or shorten the meaning; keep the spoken style; never merge or split lines
@@ -250,7 +260,7 @@ class _Client:
         self.client = make_client(api_key)
         self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-    def ask_json(self, prompt: str, valid: Callable[[dict], bool], label: str, temperature: float = 1.3) -> dict:
+    def ask_json(self, prompt: str, valid: Callable[[dict], bool], label: str, temperature: float = 1.0) -> dict:
         last_error: Exception | None = None
         for _ in range(MAX_RETRIES + 1):
             try:
@@ -262,7 +272,7 @@ class _Client:
                         {"role": "user", "content": prompt},
                     ],
                     response_format={"type": "json_object"},
-                    temperature=temperature,  # 1.3: DeepSeek's recommended setting for translation
+                    temperature=temperature,
                 )
                 data = json.loads(resp.choices[0].message.content or "{}")
                 if isinstance(data, dict) and valid(data):
@@ -329,15 +339,18 @@ def _run_chunk(client: _Client, task: str, lines: list[str], idx: list[int], src
     )
     n = len(part)
     if task == "correct":
-        data = client.ask_json(correction_prompt(part, src_lang, shared), _lines_valid(n, "fixed"), "校正", temperature=0.7)
+        data = client.ask_json(correction_prompt(part, src_lang, shared), _lines_valid(n, "fixed"), "校正", temperature=0.3)
         return _field(data, n, "fixed")
     target = TARGETS[task]
-    data = client.ask_json(faithfulness_prompt(part, src_lang, target, shared), _lines_valid(n, "direct"), "翻译")
+    # accuracy first: a low temperature for the faithful pass, a little freedom for the polish
+    data = client.ask_json(faithfulness_prompt(part, src_lang, target, shared), _lines_valid(n, "direct"), "翻译",
+                           temperature=0.7)
     direct = _field(data, n, "direct")
     if not reflect:
         return direct
     try:
-        data = client.ask_json(expressiveness_prompt(part, direct, src_lang, target, shared), _lines_valid(n, "free"), "润色")
+        data = client.ask_json(expressiveness_prompt(part, direct, src_lang, target, shared), _lines_valid(n, "free"), "润色",
+                               temperature=1.0)
         return _field(data, n, "free")
     except TranslationError:
         return direct  # the polish step is optional, as in VideoLingo

@@ -12,7 +12,11 @@ time slot, place the clips on a timeline and merge them with the video.
 - With a SiliconFlow key the speakers' own voices are cloned instead (clone.py).
 - A clip longer than its slot is synthesised again with a faster speaking rate
   (up to +60 %); whatever still doesn't fit is cut with a short fade-out.
-- The original sound can stay underneath at a chosen volume.
+- Lines of one speaker that follow each other closely are spoken in one go
+  (natural rhythm, no pause in the middle of a sentence); the silence TTS
+  voices add around speech is cut.
+- The original sound is muted while someone speaks and stays at full volume
+  in between (music, ambience); how much of it stays under speech is adjustable.
 - Videos keep their picture untouched (stream copy, fast); audio-only files
   give an MP3; optionally the subtitles are burned in as well.
 """
@@ -22,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import tempfile
 import threading
 import wave
@@ -36,6 +41,10 @@ MAX_SPEEDUP = 60  # percent
 SLOT_MARGIN = 0.05  # seconds kept free before the next line
 TARGET_RMS = 0.1  # loudness of a dubbed line of average original loudness
 FADE = 0.08  # seconds
+MERGE_GAP = 0.5  # lines of one speaker closer than this are spoken in one go
+MAX_UTTERANCE = 15.0  # seconds
+DUCK_RAMP = 0.12  # seconds to fade the original voice out / in
+DUCK_PAD = (0.1, 0.15)  # seconds of original speech muted before / after each subtitle
 WORKERS = 4
 
 VOICES = {
@@ -104,12 +113,12 @@ def _clip_for(seg: Segment, text: str, voice: dict, slot: float, tmp: str, gain:
     path = os.path.join(tmp, f"{seg.id}.mp3")
     base = voice.get("rate", 0)
     _speak(text, voice, path, base)
-    audio = _load(path)
+    audio = _trim(_load(path))
     length = len(audio) / RATE
     if length > slot * 1.03:
         factor = (1 + base / 100) * (length / slot) * 1.05  # speed that fits, relative to normal
         _speak(text, voice, path, min(MAX_SPEEDUP, math.ceil((factor - 1) * 100)))
-        audio = _load(path)
+        audio = _trim(_load(path))
     rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
     if rms > 1e-4:
         audio = audio * (TARGET_RMS * gain / rms)  # follow the original line's loudness
@@ -122,35 +131,117 @@ def _clip_for(seg: Segment, text: str, voice: dict, slot: float, tmp: str, gain:
     return audio
 
 
-def voice_track(segments: list[Segment], lang: str, voices: dict[int, dict], duration: float,
-                on_progress: Callable[[float], None] | None = None, gains: dict[int, float] | None = None):
-    """Mono float32 timeline (RATE Hz) with every line spoken at its start time,
-    line `id` in voice `voices[id]`."""
+def _same_voice(a: dict, b: dict) -> bool:
+    return (a.get("voice"), a.get("speaker"), (a.get("clone") or {}).get("uri")) == \
+        (b.get("voice"), b.get("speaker"), (b.get("clone") or {}).get("uri"))
+
+
+def _join(texts: list[str], lang: str) -> str:
+    """Lines of one utterance as one text; a line without end punctuation gets a comma
+    so the voice pauses briefly instead of running the parts together."""
+    out = ""
+    for t in texts:
+        if out:
+            if not re.search(r"[，。！？；、,.!?;:：…—]$", out):
+                out += "，" if lang == "zh" else ","
+            out += "" if lang == "zh" else " "
+        out += t
+    return out
+
+
+def utterances(segments: list[Segment], lang: str, voices: dict[int, dict],
+               gains: dict[int, float] | None = None) -> list[dict]:
+    """Subtitle lines grouped into what is spoken in one breath: consecutive lines of
+    the same speaker with less than MERGE_GAP between them. One sentence split over
+    several subtitles is then synthesised once, with natural rhythm and intonation,
+    instead of in pieces with a pause after each."""
+    segs = sorted((s for s in segments if _text(s, lang)), key=lambda s: s.start)
+    groups: list[list[Segment]] = []
+    for seg in segs:
+        last = groups[-1] if groups else None
+        if (last and seg.start - last[-1].end < MERGE_GAP and seg.end - last[0].start <= MAX_UTTERANCE
+                and _same_voice(voices[seg.id], voices[last[0].id])):
+            last.append(seg)
+        else:
+            groups.append([seg])
+    out = []
+    for n, group in enumerate(groups):
+        gs = [(gains or {}).get(s.id, 1.0) for s in group]
+        out.append({"id": n, "start": group[0].start, "end": group[-1].end, "voice": voices[group[0].id],
+                    "text": _join([_text(s, lang) for s in group], lang), "gain": sum(gs) / len(gs),
+                    "lines": [s.id for s in group]})
+    return out
+
+
+def _trim(audio):
+    """Cut the silence TTS voices put before and after the speech."""
     import numpy as np
 
-    segs = sorted((s for s in segments if _text(s, lang)), key=lambda s: s.start)
-    end = max([duration] + [s.end for s in segs])
+    hop = RATE // 100
+    if len(audio) < hop * 3:
+        return audio
+    frames = len(audio) // hop
+    rms = np.sqrt(np.mean(audio[: frames * hop].reshape(frames, hop) ** 2, axis=1))
+    loud = np.nonzero(rms > max(0.003, float(rms.max()) * 0.02))[0]
+    if not len(loud):
+        return audio
+    pad = 3  # 30 ms
+    return audio[max(0, loud[0] - pad) * hop: min(frames, loud[-1] + 1 + pad) * hop]
+
+
+def voice_track(segments: list[Segment], lang: str, voices: dict[int, dict], duration: float,
+                on_progress: Callable[[float], None] | None = None, gains: dict[int, float] | None = None,
+                spans: list | None = None):
+    """Mono float32 timeline (RATE Hz) with every utterance spoken at its start time,
+    line `id` in voice `voices[id]`. The time ranges with dubbed speech are appended
+    to `spans` as (start, end) seconds."""
+    import numpy as np
+
+    parts = utterances(segments, lang, voices, gains)
+    end = max([duration] + [u["end"] for u in parts])
     track = np.zeros(int(end * RATE) + 1, dtype=np.float32)
     done, lock = [0], threading.Lock()
 
     with tempfile.TemporaryDirectory() as tmp:
         def work(i):
-            seg = segs[i]
-            next_start = segs[i + 1].start if i + 1 < len(segs) else end
-            slot = max(0.3, next_start - seg.start - SLOT_MARGIN)
-            clip = _clip_for(seg, _text(seg, lang), voices[seg.id], slot, tmp, (gains or {}).get(seg.id, 1.0))
+            u = parts[i]
+            next_start = parts[i + 1]["start"] if i + 1 < len(parts) else end
+            slot = max(0.3, next_start - u["start"] - SLOT_MARGIN)
+            seg = Segment(u["id"], u["start"], u["end"], u["text"])
+            clip = _clip_for(seg, u["text"], u["voice"], slot, tmp, u["gain"])
             with lock:
                 done[0] += 1
                 if on_progress:
-                    on_progress(done[0] / len(segs))
-            return seg, clip
+                    on_progress(done[0] / len(parts))
+            return u, clip
 
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            for seg, clip in pool.map(work, range(len(segs))):
-                start = int(seg.start * RATE)
+            for u, clip in pool.map(work, range(len(parts))):
+                start = int(u["start"] * RATE)
                 part = clip[: len(track) - start]
                 track[start : start + len(part)] += part
+                if spans is not None:
+                    spans.append((u["start"], u["start"] + len(part) / RATE))
     return track
+
+
+def duck(original, speech_spans: list, level: float, ramp: float = DUCK_RAMP):
+    """The original sound at `level` while someone speaks (the original speaker or the
+    dub), at full volume elsewhere: music and ambience stay, the original voice goes."""
+    import numpy as np
+
+    env = np.ones(len(original), dtype=np.float32)
+    r = max(1, int(ramp * RATE))
+    for a, b in speech_spans:
+        i, j = max(0, int(a * RATE)), min(len(env), int(b * RATE))
+        if j <= 0 or i >= len(env):
+            continue
+        env[i:j] = np.minimum(env[i:j], level)
+        lo = max(0, i - r)  # fade down before ...
+        env[lo:i] = np.minimum(env[lo:i], np.linspace(1, level, r, dtype=np.float32)[r - (i - lo):])
+        hi = min(len(env), j + r)  # ... and back up after
+        env[j:hi] = np.minimum(env[j:hi], np.linspace(level, 1, r, dtype=np.float32)[: hi - j])
+    return original * env
 
 
 def _text(seg: Segment, lang: str) -> str:
@@ -238,7 +329,7 @@ def match_voices(src: str, segments: list[Segment], lang: str, clone_key: str | 
 
 
 def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str | None = None,
-        bg_volume: float = 0.2, burn_mode: str | None = None,
+        bg_volume: float = 0.0, burn_mode: str | None = None,
         on_progress: Callable[[float], None] | None = None, clone_key: str | None = None) -> tuple[Path, list[dict]]:
     """Dub `src`; returns (output file, speaker summary). The output is MP4 for videos or
     burned output, MP3 otherwise. Voices are matched to the speakers automatically unless
@@ -268,14 +359,16 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
             summary = [{"speaker": "全部台词", "voice": voice}]
         else:
             per_line, gains, summary = match_voices(src, segments, lang, clone_key, cloned)
-        speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains)
+        spans: list = []
+        speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains, spans)
     finally:
         from . import clone
 
         for key, uri in cloned:
             clone.delete(key, uri)
-    if has_audio and bg_volume > 0:
-        original = _load(src) * float(bg_volume)
+    if has_audio:
+        talking = [(s.start - DUCK_PAD[0], s.end + DUCK_PAD[1]) for s in segments] + spans
+        original = duck(_load(src), talking, float(bg_volume))
         mixed = np.zeros(max(len(speech), len(original)), dtype=np.float32)
         mixed[: len(original)] += original
         mixed[: len(speech)] += speech

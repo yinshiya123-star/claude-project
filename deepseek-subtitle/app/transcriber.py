@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from typing import Callable
 
@@ -129,6 +130,35 @@ def transcribe(
     raise AssertionError("unreachable")  # the CPU attempt either returns or raises
 
 
+# Text Whisper is known to invent over silence, music and credits (it learnt it
+# from subtitle files), and our own prompt echoed back: never real speech ...
+HALLUCINATIONS = re.compile(
+    r"请不吝点赞|明镜与点点|字幕由.{0,20}提供|Amara\.org|优优独播|中文字幕志愿者|"
+    r"subtitles by the|以下是普通话的句子|使用简体中文，并带有标点",
+    re.IGNORECASE,
+)
+# ... and phrases that people do say, but Whisper also invents: dropped only when unsure
+SUSPICIOUS = re.compile(
+    r"点赞.{0,6}订阅|订阅.{0,6}(转发|打赏)|感谢(您的)?(收看|观看)|谢谢(大家)?(收看|观看)|"
+    r"thanks? (you )?(so much )?for watching|please subscribe|like and subscribe|"
+    r"ご視聴ありがとうございました|チャンネル登録|시청해 ?주셔서 감사합니다|구독과 좋아요",
+    re.IGNORECASE,
+)
+MAX_REPEATS = 2  # the same line more often than this in a row is a loop
+
+
+def is_hallucination(text: str, no_speech_prob: float = 0.0, avg_logprob: float = 0.0,
+                     compression_ratio: float = 1.0) -> bool:
+    """Whether Whisper most likely made this segment up."""
+    if HALLUCINATIONS.search(text):
+        return True
+    if SUSPICIOUS.search(text) and (no_speech_prob > 0.2 or avg_logprob < -0.6):
+        return True
+    if no_speech_prob > 0.6 and avg_logprob < -0.5:  # probably not speech, and unsure about the words
+        return True
+    return compression_ratio > 2.4 or avg_logprob < -1.2  # repetitive gibberish / a wild guess
+
+
 def _transcribe(model, audio, language, on_progress, hotwords=None) -> tuple[list[Segment], str]:
     seg_iter, info = model.transcribe(
         audio,
@@ -139,9 +169,14 @@ def _transcribe(model, audio, language, on_progress, hotwords=None) -> tuple[lis
         # spreading and the repetition loops Whisper is known for.
         condition_on_previous_text=False,
         # Shorter silences split speech, so timestamps hug the words more tightly.
-        vad_parameters={"min_silence_duration_ms": 700},
-        # Auto mode: detect the language per segment, so mixed-language audio works.
-        multilingual=language is None,
+        # Short noises are not speech; the padding keeps first / last syllables.
+        vad_parameters={"min_silence_duration_ms": 700, "min_speech_duration_ms": 250, "speech_pad_ms": 300},
+        # Auto mode: detect the language once, from several stretches of speech.
+        # (Detecting it per 30 s window, multilingual=True, misjudges short windows
+        # and then writes or translates text that was never said.)
+        language_detection_segments=4,
+        # Skip text Whisper writes over long silences (needs word timestamps).
+        hallucination_silence_threshold=2.0,
         # Word timings let segmenter.regroup() rebuild whole sentences.
         word_timestamps=True,
         vad_filter=True,
@@ -150,7 +185,17 @@ def _transcribe(model, audio, language, on_progress, hotwords=None) -> tuple[lis
     )
     duration = info.duration or 0
     words: list[Word] = []
+    last, repeats = None, 0
     for s in seg_iter:
+        text = s.text.strip()
+        repeats = repeats + 1 if text and text == last else 0
+        last = text
+        if repeats >= MAX_REPEATS or is_hallucination(text, getattr(s, "no_speech_prob", 0.0),
+                                                      getattr(s, "avg_logprob", 0.0), getattr(s, "compression_ratio", 1.0)):
+            log.info("dropped likely hallucination at %.1fs: %s", s.start, text)
+            if on_progress and duration:
+                on_progress(min(1.0, s.end / duration))
+            continue
         if s.words:
             words += [Word(w.start, w.end, w.word) for w in s.words if w.word.strip()]
         elif s.text.strip():

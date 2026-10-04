@@ -223,12 +223,13 @@
           </div>
 
           <div class="tab-body" id="tab-dub" hidden>
-            <p class="hint">按视频里的原声自动配音：用声纹区分每个说话人（音调相近的两个人也能分开），为每个人匹配最接近的神经语音并调到他的音高和语速；每句话再跟随原句的语调起伏和音量；按时间轴对齐，太长的句子自动加快语速。需要能访问微软语音服务（首次使用会自动下载约 28 MB 的声纹模型）。</p>
+            <p class="hint">按视频里的原声自动配音：用声纹区分每个说话人（音调相近的两个人也能分开），为每个人匹配最接近的神经语音并调到他的音高和语速；每句话再跟随原句的语调起伏和音量；同一个人连着说的几句会一口气合成，不会在半句话中间停顿；按时间轴对齐，太长的句子自动加快语速；有人说话时原声自动静音，不说话时恢复。需要能访问微软语音服务（首次使用会自动下载约 28 MB 的声纹模型）。</p>
             <div class="dub-grid">
               <label class="field"><span>配音语言</span><select id="dub-lang"></select></label>
 
-              <label class="field"><span>原声音量 <b id="bg-value">20%</b></span>
-                <input id="dub-bg" type="range" min="0" max="100" value="20" /></label>
+              <label class="field"><span>说话时保留原声 <b id="bg-value">0%</b></span>
+                <input id="dub-bg" type="range" min="0" max="100" value="0" />
+                <small class="hint">有人说话时原声静音，不说话的地方（音乐、环境声）保持原样</small></label>
               <label class="field"><span>同时烧录字幕</span>
                 <select id="dub-burn"><option value="">不烧录</option></select></label>
             </div>

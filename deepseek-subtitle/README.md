@@ -105,7 +105,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `POST` | `/api/jobs/{id}/burn`，JSON `{"mode": "bilingual"}` | 开始把字幕烧录进视频；进度在任务详情的 `burn` 字段 |
 | `GET` | `/api/jobs/{id}/burned.mp4` | 下载烧录好的视频 |
 | `GET` | `/api/voices` | 配音音色列表 |
-| `POST` | `/api/jobs/{id}/dub`，JSON `{"lang": "zh", "bg_volume": 0.2, "burn_mode": null}` | 开始 AI 配音（自动匹配说话人的声音；也可传 `voice` 指定统一音色）；进度和说话人匹配结果在任务详情的 `dub` 字段 |
+| `POST` | `/api/jobs/{id}/dub`，JSON `{"lang": "zh", "bg_volume": 0, "burn_mode": null, "clone_key": ""}`（bg_volume：说话时保留的原声音量，不说话时原声不变） | 开始 AI 配音（自动匹配说话人的声音；也可传 `voice` 指定统一音色）；进度和说话人匹配结果在任务详情的 `dub` 字段 |
 | `GET` | `/api/jobs/{id}/dubbed` | 下载配音结果（MP4 或 MP3） |
 | `POST` | `/api/images`（表单 `file`、`target=zh/en/orig_zh/zh_en`、`ocr_lang`、`api_key`、`terms`） | 翻译图片里的文字，返回 `id` |
 | `GET` | `/api/images/{id}`、`/translated.png`、`/text.txt`、`/source` | 查询结果、下载译图 / 文字、原图 |

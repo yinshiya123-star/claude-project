@@ -587,7 +587,7 @@ def batch_burn(body: BatchRequest):
 class DubRequest(BaseModel):
     lang: str = "zh"
     voice: str = ""
-    bg_volume: float = 0.2
+    bg_volume: float = 0.0  # original sound kept while someone speaks
     burn_mode: str | None = None
     clone_key: str = ""  # SiliconFlow key: clone the speakers' own voices
 

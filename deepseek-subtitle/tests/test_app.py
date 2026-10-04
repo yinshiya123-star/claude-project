@@ -93,8 +93,8 @@ def test_translate_foreign_source_two_steps(monkeypatch):
     first_chunk = next(p for p in fake.prompts if FakeClient.step(p) == "direct" and '"origin": "校:line1"' in p)
     assert "Japanese" in first_chunk and 'line1: Chinese "一号"' in first_chunk  # term passed as context
     second_chunk = next(p for p in fake.prompts if FakeClient.step(p) == "direct" and '"origin": "校:line11"' in p)
-    assert "<previous_content>\n校:line8\n校:line9\n校:line10\n</previous_content>" in second_chunk
-    assert "<subsequent_content>\n校:line21\n校:line22\n</subsequent_content>" in second_chunk
+    assert "<previous_content>\n校:line6\n校:line7\n校:line8\n校:line9\n校:line10\n</previous_content>" in second_chunk
+    assert "<subsequent_content>\n校:line21\n校:line22\n校:line23\n</subsequent_content>" in second_chunk
 
 
 def test_translate_english_source_without_reflection(monkeypatch):
@@ -1174,12 +1174,13 @@ def test_line_voices_follow_pitch_and_speed():
     found = {"speakers": [{"id": 0, "f0": 120.0, "gender": "male", "lines": 3, "speed": 6.3}],
              "labels": {1: 0, 2: 0, 3: 0}, "pitch": {1: 120.0, 2: 150.0, 3: None}}
     chosen = voices.auto_voices(found["speakers"], "zh")
-    assert chosen[0]["rate"] == 25  # a fast talker gets a faster voice (capped)
+    assert chosen[0]["rate"] == 20  # a fast talker gets a faster voice (capped)
     lines = voices.line_voices(found, chosen)
     shift = chosen[0]["shift"]
     assert lines[1]["pitch"] == f"{shift:+d}Hz" and lines[3]["pitch"] == f"{shift:+d}Hz"
     assert int(lines[2]["pitch"][:-2]) > shift + 10  # said higher than usual: dubbed higher
-    assert {v["rate"] for v in lines.values()} == {25}
+    assert {v["rate"] for v in lines.values()} == {20}
+    assert voices._rate_for(1.0) == -10  # slow talkers: only a little slower
 
 
 def test_dub_clones_the_speakers_voices(monkeypatch, tmp_path):
@@ -1250,3 +1251,55 @@ def test_unexpected_errors_show_their_reason(monkeypatch, tmp_path):
     assert r.status_code == 500
     assert "读写文件失败" in r.json()["detail"]
     assert "Traceback" in (tmp_path / "error.log").read_text(encoding="utf-8")
+
+
+def test_hallucinations_are_dropped(monkeypatch):
+    from app.transcriber import is_hallucination
+
+    transcriber = _patch_whisper(monkeypatch)
+
+    def segs(self, audio, **kwargs):
+        def s(start, text, nsp=0.01, lp=-0.2, cr=1.2):
+            return SimpleNamespace(start=start, end=start + 1, text=text, words=None,
+                                   no_speech_prob=nsp, avg_logprob=lp, compression_ratio=cr)
+        return iter([
+            s(0, "今天我们去公园。"),
+            s(2, "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"),  # invented over music
+            s(4, "嗯嗯嗯嗯嗯", nsp=0.9, lp=-0.8),  # not speech
+            s(6, "好的。"), s(7, "好的。"), s(8, "好的。"), s(9, "好的。"),  # a loop
+            s(11, "谢谢大家观看。"),  # said clearly: kept
+        ]), SimpleNamespace(duration=12.0, language="zh")
+
+    monkeypatch.setattr(FakeWhisper, "transcribe", segs)
+    out, _ = transcriber.transcribe("x.mp3")
+    text = "".join(seg.text for seg in out)
+    assert "明镜" not in text and "嗯嗯" not in text
+    assert text.count("好的") == 2 and "谢谢大家观看" in text and "公园" in text
+    assert is_hallucination("Thanks for watching!", no_speech_prob=0.5)
+    assert not is_hallucination("Thanks for watching!", no_speech_prob=0.01, avg_logprob=-0.2)
+    assert is_hallucination("以下是普通话的句子，使用简体中文")
+
+
+def test_dub_speaks_a_split_sentence_in_one_go_and_mutes_the_original(monkeypatch, tmp_path):
+    import numpy as np
+
+    from app import dub as dubmod
+
+    voice = {"voice": "zh-CN-YunxiNeural", "pitch": "+0Hz", "rate": 0, "speaker": 0}
+    other = {**voice, "voice": "zh-CN-XiaoxiaoNeural", "speaker": 1}
+    segs = [Segment(1, 0.0, 1.5, "a", zh="我们今天"), Segment(2, 1.7, 3.0, "b", zh="去公园散步。"),
+            Segment(3, 3.1, 4.0, "c", zh="好啊"), Segment(4, 6.0, 7.0, "d", zh="走吧")]
+    parts = dubmod.utterances(segs, "zh", {1: voice, 2: voice, 3: other, 4: other})
+    assert [p["text"] for p in parts] == ["我们今天，去公园散步。", "好啊", "走吧"]  # same speaker, short gap: one go
+    assert parts[0]["lines"] == [1, 2] and parts[0]["end"] == 3.0
+
+    rate = dubmod.RATE
+    original = np.full(8 * rate, 0.5, dtype=np.float32)
+    ducked = dubmod.duck(original, [(1.0, 2.0), (5.0, 6.0)], 0.0)
+    assert ducked[int(1.5 * rate)] == 0 and ducked[int(5.5 * rate)] == 0  # muted while talking
+    assert ducked[int(3.5 * rate)] == 0.5 and ducked[int(0.2 * rate)] == 0.5  # full volume in between
+    assert 0 < ducked[int(0.95 * rate)] < 0.5  # faded, not cut
+    assert dubmod.duck(original, [(1.0, 2.0)], 0.2)[int(1.5 * rate)] == np.float32(0.1)
+
+    silent = np.concatenate([np.zeros(rate // 2), np.full(rate, 0.3), np.zeros(rate // 2)]).astype(np.float32)
+    assert abs(len(dubmod._trim(silent)) - rate) < rate * 0.1  # TTS silence around speech is cut

@@ -34,7 +34,9 @@ MAX_SHIFT = 50  # Hz of edge-tts pitch shift for a speaker
 LINE_SHIFT = 0.7  # how much of a line's own rise / fall in pitch the dub follows
 MAX_LINE_SHIFT = 30  # Hz on top of the speaker's shift
 TYPICAL_SPEED = 4.2  # syllables per second of an average speaker
-MAX_RATE = 25  # percent faster or slower than the voice's normal speed
+MAX_RATE = 20  # percent faster than the voice's normal speed
+MIN_RATE = -10  # percent slower: slowed-down voices drag (and line times include pauses)
+RATE_FOLLOW = 0.6  # how much of the speaker's speed difference the voice follows
 SPREAD_FOR_REUSE = 18  # Hz between two speakers who have to share one voice
 
 # (voice, typical pitch in Hz, description), from deep to bright
@@ -191,7 +193,7 @@ def analyze_speakers(audio, segments: list[Segment], voiceprints: bool = True) -
 def _rate_for(speed: float | None) -> int:
     if not speed:
         return 0
-    return max(-MAX_RATE, min(MAX_RATE, round((speed / TYPICAL_SPEED - 1) * 100)))
+    return max(MIN_RATE, min(MAX_RATE, round((speed / TYPICAL_SPEED - 1) * 100 * RATE_FOLLOW)))
 
 
 def auto_voices(speakers: list[dict], lang: str) -> dict[int, dict]:
