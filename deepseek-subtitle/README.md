@@ -4,14 +4,24 @@
 
 ## 工作流程
 
+字幕处理流程借鉴了高 star 开源项目 [VideoLingo](https://github.com/Huanshere/VideoLingo)（Apache-2.0，详见 [第三方声明](THIRD_PARTY_NOTICES.md)）：
+
 ```
-音视频文件 ──► faster-whisper 本地语音识别（带时间轴，支持多国语言） ──► DeepSeek 翻译 / 校对 ──► 字幕
+音视频文件
+  ──► faster-whisper 本地语音识别（词级时间戳，支持多国语言）
+  ──► 按标点和停顿重组成完整句子，过长的句子在逗号 / 停顿处拆开
+  ──► DeepSeek 通读全文：总结视频主题、提取人名和专业术语
+  ──► 分块翻译（每块约 600 字，带前后文、主题和术语）：直译 → 反思 → 润色
+  ──► 字幕
 ```
 
-> DeepSeek API 只支持文本，不能直接处理音频，所以先用开源的 Whisper 模型在本地把语音转成带时间轴的文字，再交给 DeepSeek 结合上下文翻译（同时修正明显的识别错误）。
+> DeepSeek API 只支持文本，不能直接处理音频，所以先用开源的 Whisper 模型在本地把语音转成带时间轴的文字，再交给 DeepSeek 翻译。和 VideoLingo 不同，这里没有使用 WhisperX、spaCy 和 PyTorch，安装包小很多，Windows 上也容易装。
 
 ## 功能
 
+- **断句更自然**：不再沿用 Whisper 随意切分的片段，而是根据词级时间戳重组成完整句子，长句在逗号或停顿处拆开
+- **精翻（翻译 → 反思 → 润色）**：参考 VideoLingo 的三步翻译，先忠实直译，再逐句反思并改写成自然的表达；可在页面上关掉以节省时间和费用
+- **主题与术语**：翻译前先让 DeepSeek 总结视频主题、提取人名和专业术语，保证全片译名一致；也可以在页面上填写自己的术语表（如 `DeepSeek=深度求索`），优先使用
 - **中英双语**：中文转双语、英文转双语，日语、韩语、法语等外语也能转成中英双语
 - **仅中文**：中文音视频转中文字幕。填写 DeepSeek Key 后会校对错别字和标点，不填也能用
 - **自动识别多国语言**：不用手动选择语言；同一个视频里混着几种语言也能逐段识别。也可以手动指定 20 种常用语言
@@ -78,7 +88,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/jobs` | 上传文件（表单字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`），返回任务 `id` |
+| `POST` | `/api/jobs` | 上传文件（表单字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`、`reflect=1/0`（精翻）、`terms`（术语表，每行 `原文=译文`）），返回任务 `id` |
 | `GET` | `/api/jobs/{id}` | 查询进度与字幕内容 |
 | `PUT` | `/api/jobs/{id}/segments` | 保存编辑后的字幕 |
 | `GET` | `/api/jobs/{id}/subtitle.srt`、`.vtt` 或 `.lrc`，参数 `mode=bilingual/zh/en/orig` | 获取字幕文件（加 `&download=true` 下载） |
@@ -93,10 +103,12 @@ export HF_ENDPOINT=https://hf-mirror.com
 app/
   main.py         FastAPI 服务、任务队列、接口
   transcriber.py  音频解码、faster-whisper 语音识别（GPU 出错自动退回 CPU）
-  translator.py   DeepSeek 批量翻译 / 中文校对（JSON 输出、带上下文、失败重试）
+  segmenter.py    用词级时间戳重组句子、拆分长句（借鉴 VideoLingo）
+  translator.py   DeepSeek 总结术语、分块两步翻译、中文校对（借鉴 VideoLingo）
   subtitles.py    SRT / VTT / LRC 生成
   export.py       导出带字幕（ID3 歌词）的 MP3
   burn.py         把字幕烧录进视频（PyAV 解码 / 编码 + Pillow 绘制字幕）
+  media.py        音频重新编码（烧录和导出 MP3 共用）
 static/           网页界面（原生 HTML/CSS/JS）
 tests/            单元测试（pytest）
 启动.bat          Windows 一键启动

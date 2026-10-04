@@ -63,7 +63,8 @@ def _has_key(api_key: str | None) -> bool:
     return bool(api_key or os.getenv("DEEPSEEK_API_KEY"))
 
 
-def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, target: str) -> None:
+def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, target: str,
+             reflect: bool = True, terms_text: str = "") -> None:
     try:
         _update(job_id, status="transcribing", stage="语音识别中（首次运行需下载模型）", progress=0.0)
         segments, lang = transcriber.transcribe(
@@ -81,13 +82,20 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
                 seg.zh, seg.en = seg.text, ""
         else:
             stage = "DeepSeek 校对中" if target == "zh" else "DeepSeek 翻译中"
-            _update(job_id, status="translating", stage=stage, progress=0.6)
-            translator.translate(
+            if reflect and target != "zh":
+                stage += "（翻译→反思→润色）"
+            _update(job_id, status="translating", stage="DeepSeek 总结主题、提取术语", progress=0.6)
+            info = translator.translate(
                 segments,
                 api_key=api_key,
-                on_progress=lambda p: _update(job_id, progress=round(0.6 + p * 0.4, 3)),
+                on_progress=lambda p: _update(job_id, progress=round(0.6 + p * 0.4, 3),
+                                              stage=stage if p > 0.1 else "DeepSeek 总结主题、提取术语"),
                 target=target,
+                source_lang=lang,
+                reflect=reflect,
+                custom_terms=translator.parse_terms(terms_text),
             )
+            _update(job_id, theme=info["theme"], terms=info["terms"])
         _update(
             job_id,
             status="done",
@@ -106,6 +114,8 @@ async def create_job(
     language: str = Form(""),
     api_key: str = Form(""),
     target: str = Form("bilingual"),
+    reflect: str = Form("1"),
+    terms: str = Form(""),
 ):
     if target not in ("bilingual", "zh"):
         raise HTTPException(400, "target 只支持 bilingual / zh")
@@ -143,9 +153,12 @@ async def create_job(
             "segments": [],
             "error": None,
             "burn": None,
+            "theme": "",
+            "terms": [],
             "created_at": time.time(),
         }
-    executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target)
+    executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target,
+                    reflect not in ("0", "false", ""), terms)
     return {"id": job_id}
 
 

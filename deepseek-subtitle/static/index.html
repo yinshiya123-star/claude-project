@@ -61,6 +61,17 @@
         </label>
       </div>
 
+      <div class="advanced">
+        <label class="check">
+          <input id="reflect" type="checkbox" checked />
+          精翻：翻译 → 反思 → 润色（参考 VideoLingo 的三步翻译，更自然，耗时和费用约 2 倍）
+        </label>
+        <label class="terms-label">
+          <span>术语表（可选）：人名、专有名词想怎么翻，每行一条，例如 <code>DeepSeek=深度求索</code></span>
+          <textarea id="terms" rows="3" placeholder="原文=译文"></textarea>
+        </label>
+      </div>
+
       <button id="start-btn" disabled>开始生成字幕</button>
       <p id="upload-error" class="error" hidden></p>
     </section>
@@ -78,6 +89,12 @@
       <div class="player-wrap">
         <video id="player" controls playsinline></video>
       </div>
+
+      <details id="summary-box" hidden>
+        <summary>视频主题与术语 <small id="terms-count"></small></summary>
+        <p id="theme"></p>
+        <table id="terms-table"></table>
+      </details>
 
       <div class="toolbar">
         <div class="seg-toggle" id="mode-toggle" role="group" aria-label="字幕显示"></div>

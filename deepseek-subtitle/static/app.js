@@ -41,6 +41,7 @@ fetch("/api/config").then((r) => r.json()).then((cfg) => {
 function updateTargetUi() {
   const zhOnly = targetSelect.value === "zh";
   languageSelect.disabled = zhOnly;
+  $("#reflect").disabled = zhOnly; // Chinese-only output is proofread, not translated
   if (zhOnly) languageSelect.value = "zh";
   $("#key-label").textContent = zhOnly ? "DeepSeek API Key（可选，填写后会用 DeepSeek 校对错别字和标点）" : "DeepSeek API Key";
   apiKeyInput.placeholder = serverKey ? "服务端已配置 Key，可留空" : zhOnly ? "可留空" : "sk-...";
@@ -80,6 +81,8 @@ startBtn.addEventListener("click", () => {
   form.append("target", targetSelect.value);
   form.append("language", languageSelect.value);
   form.append("api_key", apiKeyInput.value.trim());
+  form.append("reflect", $("#reflect").checked ? "1" : "0");
+  form.append("terms", $("#terms").value);
 
   // XHR instead of fetch so we can show upload progress.
   const xhr = new XMLHttpRequest();
@@ -170,6 +173,7 @@ function showResult(data) {
   renderModeToggle();
   renderDownloads();
   renderBurn();
+  renderSummary();
   renderList();
   renderCues();
 }
@@ -280,6 +284,27 @@ async function onDownload(e, a, fmt) {
   } finally {
     a.textContent = label;
     a.classList.remove("busy");
+  }
+}
+
+// ---- Topic summary and terms (DeepSeek, VideoLingo-style) ----
+function renderSummary() {
+  const box = $("#summary-box");
+  const terms = job.terms || [];
+  box.hidden = !job.theme && !terms.length;
+  $("#theme").textContent = job.theme || "";
+  $("#terms-count").textContent = terms.length ? `（${terms.length} 个术语，翻译时会保持一致）` : "";
+  const table = $("#terms-table");
+  table.innerHTML = "";
+  for (const t of terms) {
+    const tr = document.createElement("tr");
+    const cells = job.target === "zh" ? [t.src, t.zh, t.note] : [t.src, t.zh, t.en, t.note];
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text || "";
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
   }
 }
 

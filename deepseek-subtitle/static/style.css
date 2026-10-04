@@ -112,6 +112,19 @@ video::cue { font-size: 18px; line-height: 1.4; background: rgba(0,0,0,.65); }
 #burn-progress { margin-top: 10px; max-width: 420px; }
 #burn-fill { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
 
+.advanced { display: flex; flex-direction: column; gap: 10px; margin: 0 0 16px; font-size: 13px; color: var(--muted); }
+.advanced .check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; }
+.terms-label { display: flex; flex-direction: column; gap: 4px; }
+.terms-label code { background: var(--bg); padding: 0 4px; border-radius: 4px; }
+#terms { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); resize: vertical; }
+#summary-box { margin: 14px 0 0; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+#summary-box summary { cursor: pointer; font-weight: 600; }
+#summary-box small { color: var(--muted); font-weight: normal; }
+#theme { margin: 8px 0; }
+#terms-table { border-collapse: collapse; font-size: 13px; width: 100%; }
+#terms-table td { padding: 4px 10px 4px 0; border-top: 1px solid var(--border); vertical-align: top; }
+#terms-table td:last-child { color: var(--muted); }
+
 .table-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .table-head small { color: var(--muted); }
 #segments { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow-y: auto; border-top: 1px solid var(--border); }

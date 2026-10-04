@@ -11,6 +11,7 @@ import os
 import threading
 from typing import Callable
 
+from .segmenter import Word, regroup
 from .subtitles import Segment
 
 log = logging.getLogger(__name__)
@@ -113,17 +114,20 @@ def _transcribe(model, audio, language, on_progress) -> tuple[list[Segment], str
         initial_prompt=ZH_INITIAL_PROMPT if language == "zh" else None,
         # Auto mode: detect the language per segment, so mixed-language audio works.
         multilingual=language is None,
+        # Word timings let segmenter.regroup() rebuild whole sentences.
+        word_timestamps=True,
         vad_filter=True,
         beam_size=5,
     )
     duration = info.duration or 0
-    segments: list[Segment] = []
+    words: list[Word] = []
     for s in seg_iter:
-        text = s.text.strip()
-        if text:
-            segments.append(Segment(id=len(segments) + 1, start=s.start, end=s.end, text=text))
+        if s.words:
+            words += [Word(w.start, w.end, w.word) for w in s.words if w.word.strip()]
+        elif s.text.strip():
+            words.append(Word(s.start, s.end, " " + s.text.strip()))
         if on_progress and duration:
             on_progress(min(1.0, s.end / duration))
     if on_progress:
         on_progress(1.0)
-    return segments, info.language
+    return regroup(words), info.language
