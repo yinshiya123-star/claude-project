@@ -58,7 +58,6 @@ $("#toggle-key").addEventListener("click", (e) => {
 });
 
 let serverKey = false;
-let voices = {};
 fetch("/api/config").then((r) => r.json()).then((cfg) => {
   serverKey = cfg.server_key_configured;
   if (serverKey) apiKeyInput.placeholder = "服务端已配置 Key，可留空";
@@ -67,7 +66,6 @@ fetch("/api/config").then((r) => r.json()).then((cfg) => {
   }
   updateTargetUi();
 }).catch(() => {});
-fetch("/api/voices").then((r) => r.json()).then((v) => (voices = v)).catch(() => {});
 
 // ---------------------------------------------------------------- upload
 const fileInput = $("#file-input");
@@ -148,6 +146,7 @@ function uploadOptions() {
     correct: $("#correct").checked ? "1" : "0",
     terms: termsInput.value,
     model,
+    screen: $("#screen-auto").checked ? "1" : "0",
   };
 }
 
@@ -775,16 +774,30 @@ $("#screen-btn").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- AI dubbing
 const DUB_LABELS = {
-  running: (s) => `${s.progress < 0.7 ? "合成配音中" : "混音、合成视频中"}（${s.lang === "zh" ? "中文" : "英文"}）`,
+  running: (s) => `${s.progress < 0.02 ? "分析原声、匹配说话人" : s.progress < 0.7 ? "合成配音中" : "混音、合成视频中"}（${s.lang === "zh" ? "中文" : "英文"}）`,
   done: (s) => `下载配音结果（${s.file && s.file.endsWith(".mp3") ? "MP3" : "MP4"}）`,
   url: () => `/api/jobs/${jobId}/dubbed`,
 };
-const showDub = (state) => showTask("dub", state, DUB_LABELS);
+const showDub = (state) => {
+  showTask("dub", state, DUB_LABELS);
+  showSpeakers(state);
+};
 
-function fillVoices() {
-  const select = $("#dub-voice");
-  select.innerHTML = "";
-  for (const [id, label] of voices[$("#dub-lang").value] || []) select.add(new Option(label, id));
+// Which voice each detected speaker got (shown after dubbing).
+function showSpeakers(state) {
+  const table = $("#dub-speakers");
+  const speakers = (state && state.status === "done" && state.speakers) || [];
+  table.hidden = !speakers.length;
+  table.innerHTML = "";
+  for (const s of speakers) {
+    const tr = document.createElement("tr");
+    for (const text of [s.speaker, `→ ${s.voice}`]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
 }
 
 function renderDub() {
@@ -792,20 +805,17 @@ function renderDub() {
   langSelect.innerHTML = "";
   langSelect.add(new Option("中文配音", "zh"));
   if (job.target !== "zh") langSelect.add(new Option("英文配音", "en"));
-  fillVoices();
   fillModes($("#dub-burn"), ["", "不烧录"]);
   showDub(job.dub);
   if (job.dub && job.dub.status === "running") pollTask("dub", showDub);
 }
 
-$("#dub-lang").addEventListener("change", fillVoices);
 $("#dub-bg").addEventListener("input", (e) => ($("#bg-value").textContent = `${e.target.value}%`));
 $("#dub-btn").addEventListener("click", async () => {
   if (dirty && !(await save())) return;
   $("#dub-btn").disabled = true;
   const body = {
     lang: $("#dub-lang").value,
-    voice: $("#dub-voice").value,
     bg_volume: Number($("#dub-bg").value) / 100,
     burn_mode: $("#dub-burn").value || null,
   };

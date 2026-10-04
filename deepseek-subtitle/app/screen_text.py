@@ -58,6 +58,18 @@ def _frames(path: str, interval: float):
             next_t = frame.time + interval
 
 
+def has_picture(path: str) -> bool:
+    import av
+
+    from .media import picture_stream
+
+    try:
+        with av.open(path) as container:
+            return picture_stream(container) is not None
+    except Exception:
+        return False
+
+
 def _shrink(rgb):
     import numpy as np
     from PIL import Image

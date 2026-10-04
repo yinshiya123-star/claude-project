@@ -124,7 +124,8 @@ def _has_key(api_key: str | None) -> bool:
 
 
 def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, target: str,
-             reflect: bool = True, terms_text: str = "", model: str | None = None, correct: bool = True) -> None:
+             reflect: bool = True, terms_text: str = "", model: str | None = None, correct: bool = True,
+             screen: bool = False) -> None:
     if jobs[job_id].get("cancel"):
         return  # cancelled while waiting
     try:
@@ -146,6 +147,8 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
         _update(job_id, language=lang, segments=[s.to_dict() for s in segments])
         if not segments:
             # No speech (e.g. music with on-screen text): finish, the on-screen text tab still works.
+            if screen:
+                _queue_screen(job_id, path, target, lang, api_key, terms_text)
             _update(job_id, status="done", stage="完成（没有识别到语音，可以试试「画面文字」）", progress=1.0,
                     finished_at=time.time())
             return
@@ -177,6 +180,8 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
         # Netflix timing: reading speed, min/max duration, 2-frame gaps, frame grid.
         langs = ("zh",) if target == "zh" else ("zh", "en")
         segments = netflix_timing(segments, video_fps(path), langs)
+        if screen:  # set up before "done", so the page sees it as soon as the job is finished
+            _queue_screen(job_id, path, target, lang, api_key, terms_text)
         _update(
             job_id,
             status="done",
@@ -201,6 +206,7 @@ async def create_job(
     terms: str = Form(""),
     model: str = Form(""),
     correct: str = Form("1"),
+    screen: str = Form("0"),
 ):
     if model and model not in transcriber.MODELS:
         raise HTTPException(400, f"model 只支持 {' / '.join(transcriber.MODELS)}")
@@ -249,7 +255,8 @@ async def create_job(
     with jobs_lock:
         job_order.append(job_id)
     executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target,
-                    reflect not in ("0", "false", ""), terms, model or None, correct not in ("0", "false", ""))
+                    reflect not in ("0", "false", ""), terms, model or None, correct not in ("0", "false", ""),
+                    screen in ("1", "true"))
     return {"id": job_id}
 
 
@@ -422,6 +429,23 @@ def _run_screen(job_id: str, media_path: str, req: ScreenRequest) -> None:
         update(status="error", stage="出错", error=str(e))
 
 
+# spoken language -> OCR model for the text in the picture
+SPOKEN_TO_OCR = {"ko": "ko", "fr": "latin", "de": "latin", "es": "latin", "it": "latin", "pt": "latin", "nl": "latin",
+                 "pl": "latin", "tr": "latin", "vi": "latin", "id": "latin", "ms": "latin", "ru": "ru", "uk": "ru",
+                 "th": "th", "el": "el", "ar": "ar", "hi": "hi"}
+
+
+def _queue_screen(job_id: str, path: str, target: str, lang: str | None, api_key: str | None, terms: str) -> None:
+    """Translate the on-screen text right after the subtitles (upload option)."""
+    if not (path and _has_key(api_key) and screen_text.has_picture(path)):
+        return
+    req = ScreenRequest(target="zh" if target == "zh" else "orig_zh", ocr_lang=SPOKEN_TO_OCR.get(lang or "", "auto"),
+                        api_key=api_key or "", terms=terms)
+    _update(job_id, screen={"status": "running", "target": req.target, "progress": 0.0, "error": None,
+                            "events": [], "size": None, "stage": "排队中"})
+    image_executor.submit(_run_screen, job_id, path, req)
+
+
 @app.post("/api/jobs/{job_id}/screen")
 def start_screen(job_id: str, req: ScreenRequest):
     """Find, track and translate the text shown in the video picture."""
@@ -536,15 +560,15 @@ class DubRequest(BaseModel):
 
 
 def _run_dub(job_id: str, media_path: str, segments: list[Segment], req: DubRequest) -> None:
-    state = {"status": "running", "lang": req.lang, "progress": 0.0, "error": None, "file": None}
+    state = {"status": "running", "lang": req.lang, "progress": 0.0, "error": None, "file": None, "speakers": []}
 
     def progress(p: float) -> None:
         _update(job_id, dub={**state, "progress": round(p, 3)})
 
     try:
-        out = dub(media_path, EXPORT_DIR / f"{job_id}_dubbed", segments, req.lang, req.voice,
-                  req.bg_volume, req.burn_mode, on_progress=progress)
-        _update(job_id, dub={**state, "status": "done", "progress": 1.0, "file": out.name})
+        out, speakers = dub(media_path, EXPORT_DIR / f"{job_id}_dubbed", segments, req.lang, req.voice or None,
+                            req.bg_volume, req.burn_mode, on_progress=progress)
+        _update(job_id, dub={**state, "status": "done", "progress": 1.0, "file": out.name, "speakers": speakers})
     except Exception as e:
         _update(job_id, dub={**state, "status": "error", "error": str(e)})
 
@@ -559,9 +583,8 @@ def start_dub(job_id: str, req: DubRequest):
     """AI dubbing of the translated subtitles (edge-tts), mixed into the video."""
     if req.lang not in VOICES:
         raise HTTPException(400, "配音语言只支持 zh / en")
-    if not req.voice:
-        req.voice = VOICES[req.lang][0][0]
-    if req.voice not in {v for v, _ in VOICES[req.lang]}:
+    # No voice: matched to the speakers in the video automatically (the page always does this).
+    if req.voice and req.voice not in {v for v, _ in VOICES[req.lang]}:
         raise HTTPException(400, "不支持的配音音色")
     if req.burn_mode is not None:
         _check_mode(req.burn_mode)

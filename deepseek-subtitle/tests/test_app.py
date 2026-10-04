@@ -565,7 +565,7 @@ def _fake_tts(monkeypatch, calls=None):
 
     from app import dub
 
-    def synthesize(text, voice, path, rate=0):
+    def synthesize(text, voice, path, rate=0, pitch="+0Hz"):
         if calls is not None:
             calls.append((text, voice, rate))
         seconds = len(text) * 0.25 / (1 + rate / 100)
@@ -595,7 +595,7 @@ def test_dub_video_keeps_picture_and_fits_speech(monkeypatch, tmp_path):
         Segment(2, 3.0, 4.0, "b", zh="这一句非常非常长需要加快语速"),  # 3.5 s of speech for a 1.95 s slot
         Segment(3, 5.0, 5.5, "c", zh="好"),
     ]
-    out = dub.dub(str(src), tmp_path / "job_dubbed", segs, "zh", "zh-CN-XiaoxiaoNeural", bg_volume=0.2)
+    out, _ = dub.dub(str(src), tmp_path / "job_dubbed", segs, "zh", "zh-CN-XiaoxiaoNeural", bg_volume=0.2)
     assert out.suffix == ".mp4"
     rates = [rate for text, _, rate in calls if text.startswith("这一句")]
     assert rates == [0, dub.MAX_SPEEDUP]  # re-synthesised at the fastest allowed rate
@@ -608,9 +608,9 @@ def test_dub_video_keeps_picture_and_fits_speech(monkeypatch, tmp_path):
 
     audio = decode_audio(str(out), 16000)
     loud = lambda a, b: float(np.abs(audio[int(a * 16000):int(b * 16000)]).mean())  # noqa: E731
-    assert loud(0.6, 0.9) > 0.1 and loud(0.1, 0.4) < 0.01  # speech starts with the subtitle
-    assert loud(4.5, 4.8) > 0.05 and loud(4.96, 4.995) < 0.01  # still too long: cut before the next line
-    assert loud(5.05, 5.2) > 0.1  # next line starts on time
+    assert loud(0.6, 0.9) > 0.03 and loud(0.1, 0.4) < 0.005  # speech starts with the subtitle
+    assert loud(4.5, 4.8) > 0.03 and loud(4.96, 4.995) < 0.005  # still too long: cut before the next line
+    assert loud(5.05, 5.2) > 0.03  # next line starts on time
 
 
 def test_dub_audio_only_gives_mp3_and_burn_gives_video(monkeypatch, tmp_path):
@@ -619,9 +619,9 @@ def test_dub_audio_only_gives_mp3_and_burn_gives_video(monkeypatch, tmp_path):
     dub = _fake_tts(monkeypatch)
     src = _make_media(tmp_path, ["-f", "lavfi", "-i", "sine=duration=3"], "in.mp3")
     segs = [Segment(1, 0.5, 2.0, "Hello", zh="你好", en="Hello")]
-    out = dub.dub(str(src), tmp_path / "a_dubbed", segs, "en", "en-US-AriaNeural")
+    out, _ = dub.dub(str(src), tmp_path / "a_dubbed", segs, "en", "en-US-AriaNeural")
     assert out.suffix == ".mp3"
-    out = dub.dub(str(src), tmp_path / "b_dubbed", segs, "zh", "zh-CN-XiaoxiaoNeural", burn_mode="bilingual")
+    out, _ = dub.dub(str(src), tmp_path / "b_dubbed", segs, "zh", "zh-CN-XiaoxiaoNeural", burn_mode="bilingual")
     with av.open(str(out)) as c:
         assert out.suffix == ".mp4" and c.streams.video and c.streams.audio
 
@@ -639,7 +639,7 @@ def test_dub_api(monkeypatch, tmp_path):
         out = Path(str(stem) + ".mp4")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"dubbed")
-        return out
+        return out, [{"speaker": "说话人 1（男声）", "voice": "云健"}]
 
     monkeypatch.setattr(main, "dub", fake_dub)
     client = TestClient(main.app)
@@ -658,7 +658,8 @@ def test_dub_api(monkeypatch, tmp_path):
         if job["dub"]["status"] == "done":
             break
         time.sleep(0.05)
-    assert seen == {"lang": "en", "voice": "en-US-AriaNeural", "bg": 1.0, "burn": "en"}
+    assert seen == {"lang": "en", "voice": None, "bg": 1.0, "burn": "en"}  # no voice: matched automatically
+    assert job["dub"]["speakers"][0]["voice"] == "云健"
     r = client.get(f"/api/jobs/{job_id}/dubbed")
     assert r.content == b"dubbed" and "a.en.dubbed.mp4" in r.headers["content-disposition"]
 
@@ -984,3 +985,124 @@ def test_model_download_is_announced(monkeypatch, tmp_path):
         time.sleep(0.02)
     assert stages, {k: v for k, v in client.get(f"/api/jobs/{job_id}").json().items() if k in ("status", "stage", "error")}
     assert "正在下载识别模型 large-v3-turbo" in stages[0] and "1.6 GB" in stages[0]
+
+
+def test_segmenter_unglues_punctuation_and_merges_orphans():
+    from app.segmenter import Word, regroup
+
+    def words(tokens, gaps=None):
+        out, t = [], 0.0
+        for i, tok in enumerate(tokens):
+            t += (gaps or {}).get(i, 0)
+            out.append(Word(t, t + 0.25, tok))
+            t += 0.25
+        return out
+
+    # Whisper glued the period to the next sentence's first character
+    segs = regroup(words(["我们", "今天", "去", "公园", "散步", "了", "。我", "们", "明天", "再", "来", "。"]))
+    assert [s.text for s in segs] == ["我们今天去公园散步了。", "我们明天再来。"]
+    assert segs[0].end <= segs[1].start
+    assert [s.text for s in regroup(words([" It", " was", " fun", ".I", " will", " come", " back", "."]))] == [
+        "It was fun.", "I will come back."]
+    # a pause before the last character must not leave it on its own
+    assert [s.text for s in regroup(words(["这个", "问题", "我们", "下次", "再", "讨论", "吧", "。"], {6: 1.5}))] == [
+        "这个问题我们下次再讨论吧。"]
+    # but a complete one-character sentence stays
+    assert [s.text for s in regroup(words(["你", "吃", "饭", "了", "吗", "？", "好", "。", "走", "吧", "。"], {6: 1.5, 8: 1.5}))] == [
+        "你吃饭了吗？", "好。", "走吧。"]
+
+
+def _voices_audio():
+    """16 kHz: a low voice (110 Hz) at 0-2 s and 6-8 s, a high voice (230 Hz) at 3-5 s."""
+    import numpy as np
+
+    sr = 16000
+    audio = np.zeros(9 * sr, dtype=np.float32)
+    t = np.arange(2 * sr) / sr
+    for start, f0, amp in ((0, 110, 0.3), (3, 230, 0.3), (6, 112, 0.6)):
+        tone = sum(np.sin(2 * np.pi * f0 * k * t) / k for k in (1, 2, 3)) * amp / 2
+        audio[start * sr: start * sr + len(t)] = tone
+    return audio
+
+
+def test_speaker_analysis_and_auto_voices():
+    from app import voices
+
+    segs = [Segment(1, 0, 2, "a"), Segment(2, 3, 5, "b"), Segment(3, 6, 8, "c"), Segment(4, 8.2, 8.9, "d")]
+    found = voices.analyze_speakers(_voices_audio(), segs)
+    labels, speakers = found["labels"], found["speakers"]
+    assert labels[1] == labels[3] != labels[2]  # same low voice twice, a different high voice
+    assert labels[4] == labels[3]  # silent line goes to the speaker before it
+    low = next(s for s in speakers if s["id"] == labels[1])
+    high = next(s for s in speakers if s["id"] == labels[2])
+    assert low["gender"] == "male" and abs(low["f0"] - 111) < 5
+    assert high["gender"] == "female" and abs(high["f0"] - 230) < 8
+    assert found["loudness"][3] > found["loudness"][1] * 1.5  # line 3 is louder
+    chosen = voices.auto_voices(speakers, "zh")
+    assert chosen[low["id"]]["voice"] in {v for v, _, _ in voices.EDGE_VOICES["zh"]["male"]}
+    assert chosen[high["id"]]["voice"] in {v for v, _, _ in voices.EDGE_VOICES["zh"]["female"]}
+    voice, base, _ = next(v for v in voices.EDGE_VOICES["zh"]["female"] if v[0] == chosen[high["id"]]["voice"])
+    assert voice == "zh-CN-XiaoyiNeural"  # 230 Hz is closest to the brighter female voice (240 Hz)
+    assert chosen[high["id"]]["pitch"] == f"{round(high['f0'] - base):+d}Hz"  # shifted to the speaker's pitch
+    two_men = voices.auto_voices([{"id": 0, "f0": 100, "gender": "male", "lines": 3},
+                                  {"id": 1, "f0": 140, "gender": "male", "lines": 2}], "en")
+    assert two_men[0]["voice"] != two_men[1]["voice"]  # different people, different voices
+
+
+def test_dub_matches_voices_to_speakers(monkeypatch, tmp_path):
+    import wave
+
+    import numpy as np
+
+    calls = []
+    dub = _fake_tts(monkeypatch, calls)
+    path = tmp_path / "talk.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(_voices_audio(), -1, 1) * 32767).astype("<i2").tobytes())
+    segs = [Segment(1, 0, 2, "a", zh="你好"), Segment(2, 3, 5, "b", zh="早上好"), Segment(3, 6, 8, "c", zh="再见")]
+    out, speakers = dub.dub(str(path), tmp_path / "x_dubbed", segs, "zh", bg_volume=0)
+    used = {text: voice for text, voice, _ in calls}
+    assert used["你好"] == used["再见"] != used["早上好"]
+    assert len(speakers) == 2 and all("说话人" in s["speaker"] for s in speakers)
+
+
+def test_pitch_has_no_octave_errors():
+    import numpy as np
+
+    from app.voices import pitch
+
+    t = np.arange(16000) / 16000
+    for f0 in (100, 180, 260, 350):
+        assert abs(pitch((0.3 * np.sin(2 * np.pi * f0 * t)).astype(np.float32)) - f0) < f0 * 0.04
+    assert pitch(np.zeros(16000, dtype=np.float32)) is None
+
+
+def test_screen_text_runs_automatically_after_subtitles(monkeypatch, tmp_path):
+    from app import screen_text
+
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main.transcriber, "model_cached", lambda name=None: True)
+    monkeypatch.setattr(main.transcriber, "transcribe",
+                        lambda path, language=None, on_progress=None, **kw: ([Segment(1, 0, 1, "안녕")], "ko"))
+    monkeypatch.setattr(screen_text, "has_picture", lambda path: True)
+    seen = {}
+
+    def scan(path, lang, interval, on_progress=None):
+        seen["lang"] = lang
+        return [{"id": 1, "start": 0.0, "end": 1.0, "box": [[0, 0], [9, 0], [9, 9], [0, 9]], "text": "출구", "score": 0.9}], [640, 360]
+
+    monkeypatch.setattr(screen_text, "scan", scan)
+    _use_fake(monkeypatch)
+    client = TestClient(main.app)
+    job_id = client.post("/api/jobs", files={"file": ("a.mp4", b"x")}, data={"api_key": "k", "screen": "1"}).json()["id"]
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] == "done" and (job["screen"] or {}).get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert job["screen"]["status"] == "done" and job["screen"]["target"] == "orig_zh"
+    assert seen["lang"] == "ko"  # OCR model follows the spoken language
+    assert job["screen"]["events"][0]["zh"]

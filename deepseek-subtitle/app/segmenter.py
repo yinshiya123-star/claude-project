@@ -10,6 +10,7 @@ timings and punctuation do the job, so no extra models are needed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .subtitles import Segment
@@ -42,6 +43,66 @@ def text_len(text: str) -> float:
         else:
             width += 1
     return width
+
+
+_BREAK = "".join(SENTENCE_END + CLAUSE_BREAK + LIST_BREAK)
+# punctuation followed by more text inside one token, e.g. "。我" or ".I"
+_GLUED = re.compile(rf"(?<=[{re.escape(_BREAK)}])(?=[^\s{re.escape(_BREAK)}\"'”’」』）)])")
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+
+
+def _unglue(words: list[Word]) -> list[Word]:
+    """Whisper tokens can carry punctuation and the next sentence's first
+    character together ("。我"): split them, sharing the time by length, so the
+    character isn't left hanging at the end of the previous subtitle."""
+    out = []
+    for w in words:
+        parts = _GLUED.split(w.text)
+        if len(parts) == 1:
+            out.append(w)
+            continue
+        total = sum(len(p.strip()) or 1 for p in parts)
+        t = w.start
+        for i, part in enumerate(parts):
+            share = (w.end - w.start) * (len(part.strip()) or 1) / total
+            if i and not _CJK.search(part[:1]) and not part.startswith(" "):
+                part = " " + part  # "fun.I" -> "fun." + " I"
+            out.append(Word(t, t + share, part))
+            t += share
+    return out
+
+
+def _bare(words: list[Word]) -> str:
+    return re.sub(rf"[\s{re.escape(_BREAK)}\"'“”‘’「」『』（）()]", "", _join(words))
+
+
+def _orphan(words: list[Word]) -> bool:
+    """A lone character (or one short Latin word) that isn't a sentence of its own."""
+    bare = _bare(words)
+    return len(bare) <= 1 or (bare.isascii() and len(words) == 1 and len(bare) <= 3)
+
+
+def _merge_orphans(groups: list[list[Word]]) -> list[list[Word]]:
+    """Attach stray one-character pieces (e.g. split off by a pause) to the
+    sentence they belong to; complete short lines like "好。" stay on their own."""
+    out: list[list[Word]] = []
+    i = 0
+    while i < len(groups):
+        group = groups[i]
+        nxt = groups[i + 1] if i + 1 < len(groups) else None
+        if _orphan(group):
+            ends = _join(group).endswith(SENTENCE_END)
+            if out and not _join(out[-1]).endswith(SENTENCE_END):
+                out[-1] = out[-1] + group  # the end of the previous, unfinished sentence
+                i += 1
+                continue
+            if nxt is not None and not ends and nxt[0].start - group[-1].end < PAUSE:
+                groups[i + 1] = group + nxt  # the start of the next sentence
+                i += 1
+                continue
+        out.append(group)
+        i += 1
+    return out
 
 
 def _join(words: list[Word]) -> str:
@@ -98,7 +159,8 @@ def _split(words: list[Word]) -> list[list[Word]]:
 
 def regroup(words: list[Word]) -> list[Segment]:
     """Whole sentences, each short enough for one subtitle."""
-    groups = [part for sentence in _sentences(words) for part in _split(sentence)]
+    words = _unglue(words)
+    groups = _merge_orphans([part for sentence in _sentences(words) for part in _split(sentence)])
     segments = []
     for group in groups:
         text = _join(group)

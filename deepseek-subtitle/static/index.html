@@ -95,6 +95,8 @@
             <span><b>AI 校正识别文本</b><small>DeepSeek 结合上下文修正听错的词、同音字和标点</small></span></label>
           <label class="switch"><input id="reflect" type="checkbox" checked /><span class="slider"></span>
             <span><b>精翻：翻译 → 反思 → 润色</b><small>参考 VideoLingo 的三步翻译，更自然；耗时和费用约 2 倍</small></span></label>
+          <label class="switch"><input id="screen-auto" type="checkbox" checked /><span class="slider"></span>
+            <span><b>同时翻译视频画面里的文字</b><small>路牌、标题、PPT、外语硬字幕等，字幕生成后自动识别并翻译</small></span></label>
         </div>
 
         <button id="start-btn" class="primary big" disabled>开始生成字幕</button>
@@ -152,7 +154,7 @@
             <button class="sub-tab active" data-tab="tab-subs">📝 字幕</button>
             <button class="sub-tab" data-tab="tab-export">⬇️ 导出</button>
             <button class="sub-tab" data-tab="tab-burn">🔥 烧录</button>
-            <button class="sub-tab" data-tab="tab-screen">🖼️ 画面文字</button>
+            <button class="sub-tab" data-tab="tab-screen">🖼️ 画面/图片文字</button>
             <button class="sub-tab" data-tab="tab-dub">🎙️ AI 配音</button>
             <button class="sub-tab" data-tab="tab-terms">📚 主题术语</button>
           </nav>
@@ -221,10 +223,10 @@
           </div>
 
           <div class="tab-body" id="tab-dub" hidden>
-            <p class="hint">用微软 Edge 神经语音朗读翻译后的字幕，按时间轴对齐，太长的句子会自动加快语速。需要能访问微软语音服务。</p>
+            <p class="hint">按视频里的原声自动配音：分析每个说话人的声音（男声 / 女声、音调高低、音量），为每个人匹配最接近的神经语音，同一个人全程用同一个声音；按时间轴对齐，太长的句子自动加快语速。需要能访问微软语音服务。</p>
             <div class="dub-grid">
               <label class="field"><span>配音语言</span><select id="dub-lang"></select></label>
-              <label class="field"><span>音色</span><select id="dub-voice"></select></label>
+
               <label class="field"><span>原声音量 <b id="bg-value">20%</b></span>
                 <input id="dub-bg" type="range" min="0" max="100" value="20" /></label>
               <label class="field"><span>同时烧录字幕</span>
@@ -236,6 +238,7 @@
               <div class="bar"><div id="dub-fill"></div></div>
             </div>
             <a id="dub-download" class="download-btn" hidden>下载配音结果</a>
+            <table id="dub-speakers" class="terms-table dub-speakers" hidden></table>
             <p id="dub-error" class="error" hidden></p>
           </div>
 

@@ -5,7 +5,10 @@ Apache-2.0): synthesise every subtitle line, fit each clip into its subtitle's
 time slot, place the clips on a timeline and merge them with the video.
 
 - Speech comes from edge-tts (Microsoft Edge's online neural voices: free, no
-  key, natural Chinese and English voices).
+  key, natural Chinese and English voices). Voices are matched to the people
+  in the video automatically (voices.py): one voice per speaker, chosen by
+  gender and pitch, shifted towards the speaker's pitch, at the loudness of
+  the original line.
 - A clip longer than its slot is synthesised again with a faster speaking rate
   (up to +60 %); whatever still doesn't fit is cut with a short fade-out.
 - The original sound can stay underneath at a chosen volume.
@@ -30,6 +33,7 @@ from .subtitles import Segment
 RATE = 24000  # edge-tts voices are 24 kHz
 MAX_SPEEDUP = 60  # percent
 SLOT_MARGIN = 0.05  # seconds kept free before the next line
+TARGET_RMS = 0.1  # loudness of a dubbed line of average original loudness
 FADE = 0.08  # seconds
 WORKERS = 4
 
@@ -55,13 +59,13 @@ class DubError(RuntimeError):
     pass
 
 
-def synthesize(text: str, voice: str, path: str, rate: int = 0) -> None:
-    """Write speech for `text` to `path` (MP3) with edge-tts; rate in percent."""
+def synthesize(text: str, voice: str, path: str, rate: int = 0, pitch: str = "+0Hz") -> None:
+    """Write speech for `text` to `path` (MP3) with edge-tts; rate in percent, pitch like "+10Hz"."""
     import edge_tts
 
     async def run():
         proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or None
-        await edge_tts.Communicate(text, voice, rate=f"{rate:+d}%", proxy=proxy).save(path)
+        await edge_tts.Communicate(text, voice, rate=f"{rate:+d}%", pitch=pitch, proxy=proxy).save(path)
 
     try:
         asyncio.run(run())
@@ -75,18 +79,21 @@ def _load(path: str):
     return decode_audio(path, RATE)
 
 
-def _clip_for(seg: Segment, text: str, voice: str, slot: float, tmp: str):
-    """Speech for one line, fitted into `slot` seconds."""
+def _clip_for(seg: Segment, text: str, voice: dict, slot: float, tmp: str, gain: float = 1.0):
+    """Speech for one line, fitted into `slot` seconds; `voice` = {"voice", "pitch"}."""
     import numpy as np
 
     path = os.path.join(tmp, f"{seg.id}.mp3")
-    synthesize(text, voice, path)
+    synthesize(text, voice["voice"], path, pitch=voice["pitch"])
     audio = _load(path)
     length = len(audio) / RATE
     if length > slot * 1.03:
         rate = min(MAX_SPEEDUP, math.ceil((length / slot - 1) * 100) + 5)
-        synthesize(text, voice, path, rate)
+        synthesize(text, voice["voice"], path, rate, voice["pitch"])
         audio = _load(path)
+    rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
+    if rms > 1e-4:
+        audio = audio * (TARGET_RMS * gain / rms)  # follow the original line's loudness
     limit = int(slot * RATE)
     if len(audio) > limit:
         audio = audio[:limit].copy()
@@ -96,9 +103,10 @@ def _clip_for(seg: Segment, text: str, voice: str, slot: float, tmp: str):
     return audio
 
 
-def voice_track(segments: list[Segment], lang: str, voice: str, duration: float,
-                on_progress: Callable[[float], None] | None = None):
-    """Mono float32 timeline (RATE Hz) with every line spoken at its start time."""
+def voice_track(segments: list[Segment], lang: str, voices: dict[int, dict], duration: float,
+                on_progress: Callable[[float], None] | None = None, gains: dict[int, float] | None = None):
+    """Mono float32 timeline (RATE Hz) with every line spoken at its start time,
+    line `id` in voice `voices[id]`."""
     import numpy as np
 
     segs = sorted((s for s in segments if _text(s, lang)), key=lambda s: s.start)
@@ -111,7 +119,7 @@ def voice_track(segments: list[Segment], lang: str, voice: str, duration: float,
             seg = segs[i]
             next_start = segs[i + 1].start if i + 1 < len(segs) else end
             slot = max(0.3, next_start - seg.start - SLOT_MARGIN)
-            clip = _clip_for(seg, _text(seg, lang), voice, slot, tmp)
+            clip = _clip_for(seg, _text(seg, lang), voices[seg.id], slot, tmp, (gains or {}).get(seg.id, 1.0))
             with lock:
                 done[0] += 1
                 if on_progress:
@@ -162,10 +170,36 @@ def _remux(src: str, audio_path: str, dst: str) -> None:
         feeder.track.add(None)
 
 
-def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str,
+def match_voices(src: str, segments: list[Segment], lang: str) -> tuple[dict[int, dict], dict[int, float], list[dict]]:
+    """Voice per line from the speakers in the original audio, loudness gain per line,
+    and a summary of who got which voice."""
+    from . import voices
+    from .transcriber import decode_audio
+
+    try:
+        audio = decode_audio(src, voices.SR)
+    except RuntimeError:  # no sound track: one default voice
+        audio = None
+    if audio is None or not len(audio):
+        speakers = [{"id": 0, "f0": None, "gender": "female", "lines": len(segments)}]
+        labels, loud = {s.id: 0 for s in segments}, {}
+    else:
+        found = voices.analyze_speakers(audio, segments)
+        speakers, labels, loud = found["speakers"], found["labels"], found["loudness"]
+    chosen = voices.auto_voices(speakers, lang)
+    per_line = {s.id: chosen[labels[s.id]] for s in segments}
+    levels = sorted(v for v in loud.values() if v > 1e-4)
+    median = levels[len(levels) // 2] if levels else 0
+    gains = {sid: min(1.6, max(0.6, v / median)) for sid, v in loud.items() if median and v > 1e-4}
+    return per_line, gains, voices.describe(speakers, chosen)
+
+
+def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str | None = None,
         bg_volume: float = 0.2, burn_mode: str | None = None,
-        on_progress: Callable[[float], None] | None = None) -> Path:
-    """Dub `src`; returns the output file (MP4 for videos or burned output, MP3 otherwise).
+        on_progress: Callable[[float], None] | None = None) -> tuple[Path, list[dict]]:
+    """Dub `src`; returns (output file, speaker summary). The output is MP4 for videos or
+    burned output, MP3 otherwise. Voices are matched to the speakers automatically unless
+    `voice` forces one voice for every line.
 
     `dst_stem` has no extension (e.g. exports/<job>_dubbed); it is added here.
     """
@@ -183,7 +217,12 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
         raise DubError("没有可配音的字幕文本")
 
     step = (lambda a, b: (lambda p: on_progress(a + (b - a) * p))) if on_progress else (lambda a, b: None)
-    speech = voice_track(segments, lang, voice, duration, step(0.0, 0.7))
+    if voice:
+        per_line, gains = {s.id: {"voice": voice, "pitch": "+0Hz"} for s in segments}, {}
+        summary = [{"speaker": "全部台词", "voice": voice}]
+    else:
+        per_line, gains, summary = match_voices(src, segments, lang)
+    speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains)
     if has_audio and bg_volume > 0:
         original = _load(src) * float(bg_volume)
         mixed = np.zeros(max(len(speech), len(original)), dtype=np.float32)
@@ -222,4 +261,4 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
         os.remove(wav)
     if on_progress:
         on_progress(1.0)
-    return out
+    return out, summary
