@@ -1313,3 +1313,47 @@ def test_dub_speaks_a_split_sentence_in_one_go_and_mutes_the_original(monkeypatc
 
     silent = np.concatenate([np.zeros(rate // 2), np.full(rate, 0.3), np.zeros(rate // 2)]).astype(np.float32)
     assert abs(len(dubmod._trim(silent)) - rate) < rate * 0.1  # TTS silence around speech is cut
+
+
+def test_raw_upload_then_start(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    started = []
+    monkeypatch.setattr(main.executor, "submit", lambda fn, *args: started.append(args))
+    monkeypatch.setattr(main.image_executor, "submit", lambda fn, *args: started.append(args))
+    client = TestClient(main.app)
+    r = client.post("/api/uploads?name=" + "测试 视频，第1集.mp4", content=b"video-bytes")
+    upload_id = r.json()["upload_id"]
+    assert client.post("/api/jobs/start", json={"upload_id": upload_id, "target": "bilingual"}).status_code == 400  # no key
+    r = client.post("/api/jobs/start", json={"upload_id": upload_id, "target": "zh", "screen": True})
+    job = client.get(f"/api/jobs/{r.json()['id']}").json()
+    assert job["filename"] == "测试 视频，第1集.mp4" and job["target"] == "zh"
+    _, path, language, _, target, reflect, _, _, correct, screen = started[-1]
+    assert Path(path).read_bytes() == b"video-bytes" and language == "zh" and screen is True and reflect and correct
+    # one upload, one job
+    assert client.post("/api/jobs/start", json={"upload_id": upload_id, "target": "zh"}).status_code == 404
+    assert client.post("/api/uploads?name=a.exe", content=b"x").status_code == 400
+    assert client.post("/api/uploads?name=a.mp4", content=b"").status_code == 400
+    # images go the same way, but only image files
+    vid = client.post("/api/uploads?name=a.mp4", content=b"x").json()["upload_id"]
+    assert client.post("/api/images/start", json={"upload_id": vid, "api_key": "k"}).status_code == 400
+    img = client.post("/api/uploads?name=a.png", content=b"png").json()["upload_id"]
+    r = client.post("/api/images/start", json={"upload_id": img, "api_key": "k", "target": "zh"})
+    assert r.status_code == 200 and started[-1][2] == "zh"
+
+
+def test_form_parse_errors_show_their_cause(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    def broken():  # what FastAPI raises when reading a form fails
+        raise HTTPException(400, "There was an error parsing the body") from OSError(28, "No space left on device")
+
+    main.app.add_api_route("/api/_test_parse_error", broken, methods=["POST"])
+    routes = main.app.router.routes
+    routes.insert(0, routes.pop())  # before the static files mount
+    try:
+        r = TestClient(main.app).post("/api/_test_parse_error")
+    finally:
+        routes.pop(0)
+    assert r.status_code == 400 and "No space left on device" in r.json()["detail"]
+    assert "解析上传内容失败" in r.json()["detail"]
+    assert TestClient(main.app).get("/api/jobs/nope").json()["detail"] == "任务不存在"  # other errors unchanged

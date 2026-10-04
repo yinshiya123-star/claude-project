@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 
 load_dotenv()
@@ -57,6 +58,19 @@ def _log_error(where: str, exc: BaseException) -> None:
             f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     except OSError:
         pass
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException):
+    """FastAPI answers "There was an error parsing the body" for any failure while reading
+    a form; add the actual reason so it can be fixed."""
+    detail = exc.detail
+    if exc.status_code == 400 and detail == "There was an error parsing the body" and exc.__cause__ is not None:
+        _log_error(f"{request.method} {request.url.path} 解析上传内容", exc.__cause__)
+        cause = exc.__cause__
+        detail = (f"解析上传内容失败：{type(cause).__name__}: {cause}。可以在程序文件夹里运行 "
+                  f"pip install -U fastapi starlette python-multipart 后重启（详细信息见 data/error.log）")
+    return JSONResponse({"detail": detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
 
 @app.exception_handler(Exception)
@@ -225,50 +239,49 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
         _update(job_id, status="error", stage="出错", error=str(e))
 
 
-@app.post("/api/jobs")
-async def create_job(
-    file: UploadFile = File(...),
-    language: str = Form(""),
-    api_key: str = Form(""),
-    target: str = Form("bilingual"),
-    reflect: str = Form("1"),
-    terms: str = Form(""),
-    model: str = Form(""),
-    correct: str = Form("1"),
-    screen: str = Form("0"),
-):
-    if model and model not in transcriber.MODELS:
+class JobOptions(BaseModel):
+    language: str = ""
+    api_key: str = ""
+    target: str = "bilingual"
+    reflect: bool = True
+    terms: str = ""
+    model: str = ""
+    correct: bool = True
+    screen: bool = False
+
+
+def _check_job_options(o: JobOptions) -> JobOptions:
+    if o.model and o.model not in transcriber.MODELS:
         raise HTTPException(400, f"model 只支持 {' / '.join(transcriber.MODELS)}")
-    if target not in ("bilingual", "zh"):
+    if o.target not in ("bilingual", "zh"):
         raise HTTPException(400, "target 只支持 bilingual / zh")
-    if target == "zh":
-        language = "zh"  # Chinese audio -> Chinese subtitles
-    elif not _has_key(api_key.strip()):
+    if o.target == "zh":
+        o.language = "zh"  # Chinese audio -> Chinese subtitles
+    elif not _has_key(o.api_key.strip()):
         raise HTTPException(400, "请填写 DeepSeek API Key，或在服务端 .env 中配置 DEEPSEEK_API_KEY")
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in ALLOWED_EXT:
-        raise HTTPException(400, f"不支持的文件格式 {ext or '(无扩展名)'}，支持: {', '.join(sorted(ALLOWED_EXT))}")
+    return o
 
+
+def _check_ext(filename: str, allowed: set[str], what: str = "文件") -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext not in allowed:
+        raise HTTPException(400, f"不支持的{what}格式 {ext or '(无扩展名)'}，支持: {', '.join(sorted(allowed))}")
+    return ext
+
+
+def _too_big() -> HTTPException:
+    return HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限")
+
+
+def _new_job(path: Path, filename: str, content_type: str, o: JobOptions) -> str:
     job_id = uuid.uuid4().hex[:12]
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)  # the data folder may have been deleted meanwhile
-    dest = UPLOAD_DIR / f"{job_id}{ext}"
-    size = 0
-    with dest.open("wb") as out:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                out.close()
-                dest.unlink(missing_ok=True)
-                raise HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限")
-            out.write(chunk)
-
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
-            "filename": file.filename,
-            "target": target,
-            "media_path": str(dest),
-            "media_type": file.content_type or "",
+            "filename": filename,
+            "target": o.target,
+            "media_path": str(path),
+            "media_type": content_type or "",
             "status": "queued",
             "stage": "排队中",
             "progress": 0.0,
@@ -282,12 +295,100 @@ async def create_job(
             "terms": [],
             "created_at": time.time(),
         }
-    with jobs_lock:
         job_order.append(job_id)
-    executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target,
-                    reflect not in ("0", "false", ""), terms, model or None, correct not in ("0", "false", ""),
-                    screen in ("1", "true"))
-    return {"id": job_id}
+    executor.submit(_run_job, job_id, str(path), o.language.strip() or None, o.api_key.strip() or None, o.target,
+                    o.reflect, o.terms, o.model or None, o.correct, o.screen)
+    return job_id
+
+
+# ---- uploads: the page sends the file as the raw request body, then starts the job
+# with a small JSON request. No multipart form parsing (its library versions on
+# users' machines caused "There was an error parsing the body"), no temp copies.
+uploads: dict[str, dict] = {}
+
+
+@app.post("/api/uploads")
+async def upload_file(request: Request, name: str = ""):
+    """Store the request body as a file; `name` is the original file name."""
+    _check_ext(name, ALLOWED_EXT | image_translate.IMAGE_EXT)
+    upload_id = uuid.uuid4().hex[:12]
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)  # the data folder may have been deleted meanwhile
+    dest = UPLOAD_DIR / f"up_{upload_id}{Path(name).suffix.lower()}"
+    size = 0
+    try:
+        with dest.open("wb") as out:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise _too_big()
+                out.write(chunk)
+    except BaseException as e:
+        dest.unlink(missing_ok=True)
+        from starlette.requests import ClientDisconnect
+
+        if isinstance(e, ClientDisconnect):
+            raise HTTPException(400, "上传中断，请重试") from e
+        raise
+    if not size:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "上传的文件是空的")
+    with jobs_lock:
+        uploads[upload_id] = {"path": dest, "filename": name, "content_type": request.headers.get("x-content-type", "")}
+    return {"upload_id": upload_id}
+
+
+def _take_upload(upload_id: str, allowed: set[str], what: str) -> dict:
+    with jobs_lock:
+        item = uploads.get(upload_id)
+    if item is None or not item["path"].exists():
+        raise HTTPException(404, "上传的文件不存在，请重新上传")
+    _check_ext(item["filename"], allowed, what)
+    with jobs_lock:
+        uploads.pop(upload_id, None)
+    return item
+
+
+class StartJob(JobOptions):
+    upload_id: str
+
+
+@app.post("/api/jobs/start")
+def start_job(req: StartJob):
+    """Start subtitling a file sent to /api/uploads."""
+    _check_job_options(req)
+    item = _take_upload(req.upload_id, ALLOWED_EXT, "文件")
+    return {"id": _new_job(item["path"], item["filename"], item["content_type"], req)}
+
+
+@app.post("/api/jobs")
+async def create_job(
+    file: UploadFile = File(...),
+    language: str = Form(""),
+    api_key: str = Form(""),
+    target: str = Form("bilingual"),
+    reflect: str = Form("1"),
+    terms: str = Form(""),
+    model: str = Form(""),
+    correct: str = Form("1"),
+    screen: str = Form("0"),
+):
+    """Multipart form version of /api/uploads + /api/jobs/start (for scripts)."""
+    o = _check_job_options(JobOptions(
+        language=language, api_key=api_key, target=target, reflect=reflect not in ("0", "false", ""),
+        terms=terms, model=model, correct=correct not in ("0", "false", ""), screen=screen in ("1", "true")))
+    ext = _check_ext(file.filename, ALLOWED_EXT)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)  # the data folder may have been deleted meanwhile
+    dest = UPLOAD_DIR / f"up_{uuid.uuid4().hex[:12]}{ext}"
+    size = 0
+    with dest.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise _too_big()
+            out.write(chunk)
+    return {"id": _new_job(dest, file.filename, file.content_type, o)}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -717,6 +818,46 @@ def _run_image(image_id: str, path: str, target: str, ocr_lang: str, api_key: st
         _update_image(image_id, status="error", stage="出错", error=str(e))
 
 
+class ImageOptions(BaseModel):
+    target: str = "orig_zh"
+    ocr_lang: str = "auto"
+    api_key: str = ""
+    terms: str = ""
+
+
+def _check_image_options(o: ImageOptions) -> None:
+    if o.target not in image_translate.TARGETS:
+        raise HTTPException(400, f"target 只支持 {' / '.join(image_translate.TARGETS)}")
+    if o.ocr_lang not in image_translate.OCR_LANGS:
+        raise HTTPException(400, f"ocr_lang 只支持 {' / '.join(image_translate.OCR_LANGS)}")
+    if not _has_key(o.api_key.strip()):
+        raise HTTPException(400, "请填写 DeepSeek API Key，或在服务端 .env 中配置 DEEPSEEK_API_KEY")
+
+
+def _new_image(path: Path, filename: str, o: ImageOptions) -> str:
+    image_id = uuid.uuid4().hex[:12]
+    with jobs_lock:
+        images[image_id] = {
+            "id": image_id, "filename": filename, "path": str(path), "target": o.target,
+            "status": "queued", "stage": "排队中", "progress": 0.0, "lines": [], "error": None,
+            "language": None, "theme": "", "terms": [],
+        }
+    image_executor.submit(_run_image, image_id, str(path), o.target, o.ocr_lang, o.api_key.strip() or None, o.terms)
+    return image_id
+
+
+class StartImage(ImageOptions):
+    upload_id: str
+
+
+@app.post("/api/images/start")
+def start_image_job(req: StartImage):
+    """Translate the text in an image sent to /api/uploads (OCR + DeepSeek)."""
+    _check_image_options(req)
+    item = _take_upload(req.upload_id, image_translate.IMAGE_EXT, "图片")
+    return {"id": _new_image(item["path"], item["filename"], req)}
+
+
 @app.post("/api/images")
 async def create_image_job(
     file: UploadFile = File(...),
@@ -725,31 +866,17 @@ async def create_image_job(
     api_key: str = Form(""),
     terms: str = Form(""),
 ):
-    """Translate the text in an image (OCR + DeepSeek)."""
-    if target not in image_translate.TARGETS:
-        raise HTTPException(400, f"target 只支持 {' / '.join(image_translate.TARGETS)}")
-    if ocr_lang not in image_translate.OCR_LANGS:
-        raise HTTPException(400, f"ocr_lang 只支持 {' / '.join(image_translate.OCR_LANGS)}")
-    if not _has_key(api_key.strip()):
-        raise HTTPException(400, "请填写 DeepSeek API Key，或在服务端 .env 中配置 DEEPSEEK_API_KEY")
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in image_translate.IMAGE_EXT:
-        raise HTTPException(400, f"不支持的图片格式 {ext or '(无扩展名)'}，支持: {', '.join(sorted(image_translate.IMAGE_EXT))}")
+    """Multipart form version of /api/uploads + /api/images/start."""
+    o = ImageOptions(target=target, ocr_lang=ocr_lang, api_key=api_key, terms=terms)
+    _check_image_options(o)
+    ext = _check_ext(file.filename, image_translate.IMAGE_EXT, "图片")
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "图片太大")
-    image_id = uuid.uuid4().hex[:12]
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOAD_DIR / f"img_{image_id}{ext}"
+    dest = UPLOAD_DIR / f"img_{uuid.uuid4().hex[:12]}{ext}"
     dest.write_bytes(data)
-    with jobs_lock:
-        images[image_id] = {
-            "id": image_id, "filename": file.filename, "path": str(dest), "target": target,
-            "status": "queued", "stage": "排队中", "progress": 0.0, "lines": [], "error": None,
-            "language": None, "theme": "", "terms": [],
-        }
-    image_executor.submit(_run_image, image_id, str(dest), target, ocr_lang, api_key.strip() or None, terms)
-    return {"id": image_id}
+    return {"id": _new_image(dest, file.filename, o)}
 
 
 @app.get("/api/images/{image_id}")

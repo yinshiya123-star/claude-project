@@ -101,7 +101,9 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/jobs` | 上传文件（表单字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`、`model`、`reflect=1/0`（精翻）、`correct=1/0`（AI 校正）、`terms`（术语表，每行 `原文=译文`）），返回任务 `id` |
+| `POST` | `/api/uploads?name=文件名` | 上传文件：请求体就是文件本身（不是表单），返回 `upload_id` |
+| `POST` | `/api/jobs/start`，JSON `{"upload_id", "target": "bilingual/zh", "language", "api_key", "model", "reflect": true, "correct": true, "terms", "screen": false}` | 用上传的文件创建字幕任务，返回任务 `id`（网页用这种方式） |
+| `POST` | `/api/jobs` | 表单方式一步上传并创建任务（字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`、`model`、`reflect=1/0`（精翻）、`correct=1/0`（AI 校正）、`terms`（术语表，每行 `原文=译文`）），返回任务 `id` |
 | `GET` | `/api/jobs/{id}` | 查询进度与字幕内容 |
 | `PUT` | `/api/jobs/{id}/segments` | 保存编辑后的字幕 |
 | `GET` | `/api/jobs/{id}/subtitle.srt`、`.vtt` 或 `.lrc`，参数 `mode=bilingual/zh/en/orig` | 获取字幕文件（加 `&download=true` 下载） |
@@ -111,6 +113,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `GET` | `/api/voices` | 配音音色列表 |
 | `POST` | `/api/jobs/{id}/dub`，JSON `{"lang": "zh", "bg_volume": 0, "burn_mode": null, "engine": "clone"}`（engine：clone 克隆原声 / edge 微软神经语音；bg_volume：说话时保留的原声音量，不说话时原声不变） | 开始 AI 配音（自动匹配说话人的声音；也可传 `voice` 指定统一音色）；进度和说话人匹配结果在任务详情的 `dub` 字段 |
 | `GET` | `/api/jobs/{id}/dubbed` | 下载配音结果（MP4 或 MP3） |
+| `POST` | `/api/images/start`，JSON `{"upload_id", "target": "zh/en/orig_zh/zh_en", "ocr_lang", "api_key", "terms"}` | 翻译 `/api/uploads` 上传的图片里的文字，返回 `id` |
 | `POST` | `/api/images`（表单 `file`、`target=zh/en/orig_zh/zh_en`、`ocr_lang`、`api_key`、`terms`） | 翻译图片里的文字，返回 `id` |
 | `GET` | `/api/images/{id}`、`/translated.png`、`/text.txt`、`/source` | 查询结果、下载译图 / 文字、原图 |
 | `POST` | `/api/jobs/{id}/screen`，JSON `{"target": "orig_zh", "ocr_lang": "auto", "interval": 1.0, "api_key": "..."}` | 识别并翻译视频画面里的文字；结果在任务详情的 `screen` 字段 |

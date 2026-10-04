@@ -19,12 +19,15 @@ if errorlevel 1 (
 )
 for /f "delims=" %%v in ('python --version 2^>^&1') do echo 已找到 %%v
 
-rem ---- 2. 检查并安装依赖（只在第一次运行时安装）----
-python -c "import fastapi, uvicorn, multipart, openai, faster_whisper, dotenv, mutagen, PIL, edge_tts, rapidocr, sherpa_onnx" >nul 2>&1
-if not errorlevel 1 goto :run
+rem ---- 2. 安装依赖：第一次运行，或者程序更新后 requirements.txt 变了（会升级旧版本）----
+set NEED_INSTALL=0
+python -c "import fastapi, uvicorn, multipart, openai, faster_whisper, dotenv, mutagen, PIL, edge_tts, rapidocr, sherpa_onnx" >nul 2>&1 || set NEED_INSTALL=1
+if not exist "data\installed-requirements.txt" set NEED_INSTALL=1
+if exist "data\installed-requirements.txt" fc /b requirements.txt "data\installed-requirements.txt" >nul 2>&1 || set NEED_INSTALL=1
+if "%NEED_INSTALL%"=="0" goto :run
 
 echo.
-echo 第一次运行，正在安装依赖，需要几分钟，请耐心等待...
+echo 第一次运行或程序已更新，正在安装/更新依赖，需要几分钟，请耐心等待...
 echo.
 rem 清掉本窗口的代理设置，避免 SSL 报错
 set HTTP_PROXY=
@@ -32,13 +35,13 @@ set HTTPS_PROXY=
 set http_proxy=
 set https_proxy=
 
-python -m pip install -r requirements.txt -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-if not errorlevel 1 goto :run
+python -m pip install -U -r requirements.txt -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+if not errorlevel 1 goto :installed
 
 echo.
 echo 阿里云镜像安装失败，换清华镜像重试...
-python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-if not errorlevel 1 goto :run
+python -m pip install -U -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+if not errorlevel 1 goto :installed
 
 echo.
 echo [错误] 依赖安装失败。可以尝试：
@@ -46,6 +49,11 @@ echo   1. 关闭代理或加速器软件（如 Clash、v2rayN），然后重新�
 echo   2. 如果上面的报错里有 av、ctranslate2 或 building wheel，
 echo      说明 Python 版本太新，请卸载后改装 Python 3.12。
 goto :fail
+
+rem 记下装好的依赖清单，下次启动时没有变化就不再安装
+:installed
+if not exist data mkdir data
+copy /y requirements.txt "data\installed-requirements.txt" >nul
 
 rem ---- 3. 启动服务 ----
 :run

@@ -42,15 +42,17 @@ if [ ! -x .venv/bin/python ]; then
 fi
 VPY=.venv/bin/python
 
-# ---- 3. 安装依赖（只在缺少时安装）----
-if ! "$VPY" -c "$DEPS" >/dev/null 2>&1; then
+# ---- 3. 安装依赖：第一次运行，或者程序更新后 requirements.txt 变了（会升级旧版本）----
+STAMP=data/installed-requirements.txt
+if ! "$VPY" -c "$DEPS" >/dev/null 2>&1 || ! cmp -s requirements.txt "$STAMP"; then
     echo
-    echo "第一次运行，正在安装依赖，需要几分钟，请耐心等待..."
+    echo "第一次运行或程序已更新，正在安装/更新依赖，需要几分钟，请耐心等待..."
     echo
-    "$VPY" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ \
-        || { echo; echo "阿里云镜像安装失败，换清华镜像重试..."; "$VPY" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple; } \
-        || { echo; echo "国内镜像安装失败，换官方源重试..."; "$VPY" -m pip install -r requirements.txt; } \
+    "$VPY" -m pip install -U -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ \
+        || { echo; echo "阿里云镜像安装失败，换清华镜像重试..."; "$VPY" -m pip install -U -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple; } \
+        || { echo; echo "国内镜像安装失败，换官方源重试..."; "$VPY" -m pip install -U -r requirements.txt; } \
         || fail "依赖安装失败。请检查网络；如果开着代理软件，可以关掉后重试。"
+    mkdir -p data && cp requirements.txt "$STAMP"
 fi
 
 # ---- 4. 启动服务 ----

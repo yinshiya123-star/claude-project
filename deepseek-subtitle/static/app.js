@@ -143,43 +143,52 @@ function uploadOptions() {
     target: targetInput.value,
     language: languageSelect.value,
     api_key: apiKeyInput.value.trim(),
-    reflect: $("#reflect").checked ? "1" : "0",
-    correct: $("#correct").checked ? "1" : "0",
+    reflect: $("#reflect").checked,
+    correct: $("#correct").checked,
     terms: termsInput.value,
     model,
-    screen: $("#screen-auto").checked ? "1" : "0",
+    screen: $("#screen-auto").checked,
   };
 }
 
-function upload(item, options) {
-  return new Promise((resolve) => {
-    const form = new FormData();
-    form.append("file", item.file);
-    for (const [k, v] of Object.entries(options)) form.append(k, v);
-    // XHR instead of fetch so we can show upload progress.
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/jobs");
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      item.stage = `上传中 ${Math.round((e.loaded / e.total) * 100)}%`;
-      item.progress = 0;
-      renderQueue();
-    };
+// Send a file as the raw request body (no multipart form); resolves to the upload id.
+function sendFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest(); // XHR instead of fetch so we can show upload progress
+    xhr.open("POST", `/api/uploads?name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    if (file.type) xhr.setRequestHeader("X-Content-Type", file.type);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 400) Object.assign(item, { status: "error", stage: "出错", error: data.detail || `上传失败（${xhr.status}）` });
-      else Object.assign(item, { id: data.id, status: "queued", stage: "排队中" });
-      renderQueue();
-      resolve();
+      if (xhr.status >= 400 || !data.upload_id) reject(new Error(data.detail || `上传失败（${xhr.status}）`));
+      else resolve(data.upload_id);
     };
-    xhr.onerror = () => {
-      Object.assign(item, { status: "error", stage: "出错", error: "网络错误，上传失败" });
-      renderQueue();
-      resolve();
-    };
-    xhr.send(form);
+    xhr.onerror = () => reject(new Error("网络错误，上传失败"));
+    xhr.send(file);
   });
+}
+
+async function postJson(url, body, fallback) {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(await errorText(res, `${fallback}（${res.status}）`));
+  return res.json();
+}
+
+async function upload(item, options) {
+  try {
+    const uploadId = await sendFile(item.file, (p) => {
+      item.stage = `上传中 ${Math.round(p * 100)}%`;
+      item.progress = 0;
+      renderQueue();
+    });
+    const data = await postJson("/api/jobs/start", { ...options, upload_id: uploadId }, "创建任务失败");
+    Object.assign(item, { id: data.id, status: "queued", stage: "排队中" });
+  } catch (err) {
+    Object.assign(item, { status: "error", stage: "出错", error: err.message });
+  }
+  renderQueue();
 }
 
 startBtn.addEventListener("click", async () => {
@@ -867,16 +876,16 @@ async function uploadImages(files) {
     const card = $("#img-card-tpl").content.firstElementChild.cloneNode(true);
     $(".img-name", card).textContent = file.name;
     $("#img-results").prepend(card);
-    const form = new FormData();
-    form.append("file", file);
-    form.append("target", getImageTarget());
-    form.append("ocr_lang", $("#ocr-lang").value || "auto");
-    form.append("api_key", apiKeyInput.value.trim());
-    form.append("terms", termsInput.value);
     try {
-      const res = await fetch("/api/images", { method: "POST", body: form });
-      if (!res.ok) throw new Error(await errorText(res, `上传失败（${res.status}）`));
-      pollImage((await res.json()).id, card);
+      const uploadId = await sendFile(file);
+      const data = await postJson("/api/images/start", {
+        upload_id: uploadId,
+        target: getImageTarget(),
+        ocr_lang: $("#ocr-lang").value || "auto",
+        api_key: apiKeyInput.value.trim(),
+        terms: termsInput.value,
+      }, "创建任务失败");
+      pollImage(data.id, card);
     } catch (err) {
       imageFailed(card, err.message);
     }
