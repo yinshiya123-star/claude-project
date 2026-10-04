@@ -18,8 +18,10 @@ SENTENCE_END = tuple(".?!。？！…")
 CLAUSE_BREAK = tuple(",;:，；：")
 LIST_BREAK = tuple("、")  # enumeration comma: a weaker split point than a real comma
 PAUSE = 1.2  # seconds of silence that end a sentence
-MAX_LEN = 60  # weighted length (see text_len) of one subtitle
-MAX_DURATION = 8.0  # seconds
+# Netflix limits: 7 s, two lines (2 x 42 English / 2 x 16 Chinese characters).
+# Sources are kept a little under two English lines, leaving room for the translation.
+MAX_LEN = 70  # weighted length (see text_len) of one subtitle
+MAX_DURATION = 7.0  # seconds
 
 
 @dataclass
@@ -30,12 +32,13 @@ class Word:
 
 
 def text_len(text: str) -> float:
-    """Display width: CJK characters count roughly double (VideoLingo's calc_len idea)."""
+    """Display width (VideoLingo's calc_len idea): a CJK character weighs 2.2, so
+    MAX_LEN allows 70 Latin or about 32 Chinese characters (Netflix: 2 x 16)."""
     width = 0.0
     for ch in text:
         code = ord(ch)
         if 0x3000 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xFF00 <= code <= 0xFFEF:
-            width += 1.75
+            width += 2.2
         else:
             width += 1
     return width

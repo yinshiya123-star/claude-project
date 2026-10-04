@@ -6,3 +6,5 @@ faster-whisper>=1.0
 python-dotenv>=1.0
 mutagen>=1.47
 pillow>=10.0
+edge-tts>=6.1
+rapidocr>=3.0

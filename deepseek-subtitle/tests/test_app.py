@@ -47,7 +47,7 @@ class FakeClient:
             return "free"
         if '"direct"' in prompt:
             return "direct"
-        return "proofread"
+        return "correct"
 
     def create(self, messages, **kwargs):
         assert "json" in messages[0]["content"]  # DeepSeek's JSON mode requirement
@@ -63,7 +63,7 @@ class FakeClient:
             lang = "zh" if "Simplified Chinese" in prompt.split("## INPUT")[0] else "en"
             for item in template.values():
                 origin = item["origin"]
-                item.update({"direct": f"{lang}直译:{origin}", "free": f"{lang}意译:{origin}", "zh": f"校:{origin}"})
+                item.update({"direct": f"{lang}直译:{origin}", "free": f"{lang}意译:{origin}", "fixed": f"校:{origin}"})
             if self.drop_first == step:
                 self.drop_first = None
                 template.pop(str(len(template)))
@@ -82,22 +82,33 @@ def test_translate_foreign_source_two_steps(monkeypatch):
     fake = _use_fake(monkeypatch)
     segs = [Segment(i, i, i + 1, f"line{i}") for i in range(1, 26)]
     info = translator.translate(segs, source_lang="ja")
-    assert segs[0].zh == "zh意译:line1" and segs[24].en == "en意译:line25"
+    # recognition text corrected first, then translated from the corrected text
+    assert segs[0].text == "校:line1"
+    assert segs[0].zh == "zh意译:校:line1" and segs[24].en == "en意译:校:line25"
     assert info["theme"] == "一个测试视频。" and info["terms"][0]["zh"] == "一号"
     steps = [FakeClient.step(p) for p in fake.prompts]
-    # summary + 3 chunks (10 lines max) x 2 languages x (faithful + reflect)
-    assert steps.count("summary") == 1 and steps.count("direct") == 6 and steps.count("free") == 6
-    first_chunk = next(p for p in fake.prompts if FakeClient.step(p) == "direct" and '"origin": "line1"' in p)
+    # summary + 3 chunks (10 lines max) x (correction + 2 languages x (faithful + reflect))
+    assert steps.count("summary") == 1 and steps.count("correct") == 3
+    assert steps.count("direct") == 6 and steps.count("free") == 6
+    first_chunk = next(p for p in fake.prompts if FakeClient.step(p) == "direct" and '"origin": "校:line1"' in p)
     assert "Japanese" in first_chunk and 'line1: Chinese "一号"' in first_chunk  # term passed as context
-    second_chunk = next(p for p in fake.prompts if FakeClient.step(p) == "direct" and '"origin": "line11"' in p)
-    assert "<previous_content>\nline8\nline9\nline10\n</previous_content>" in second_chunk
-    assert "<subsequent_content>\nline21\nline22\n</subsequent_content>" in second_chunk
+    second_chunk = next(p for p in fake.prompts if FakeClient.step(p) == "direct" and '"origin": "校:line11"' in p)
+    assert "<previous_content>\n校:line8\n校:line9\n校:line10\n</previous_content>" in second_chunk
+    assert "<subsequent_content>\n校:line21\n校:line22\n</subsequent_content>" in second_chunk
 
 
 def test_translate_english_source_without_reflection(monkeypatch):
     fake = _use_fake(monkeypatch)
     segs = [Segment(1, 0, 1, "Hello there")]
     translator.translate(segs, source_lang="en", reflect=False)
+    assert segs[0].zh == "zh直译:校:Hello there" and segs[0].en == "校:Hello there"
+    assert [FakeClient.step(p) for p in fake.prompts] == ["summary", "correct", "direct"]
+
+
+def test_translate_without_correction(monkeypatch):
+    fake = _use_fake(monkeypatch)
+    segs = [Segment(1, 0, 1, "Hello there")]
+    translator.translate(segs, source_lang="en", reflect=False, correct=False)
     assert segs[0].zh == "zh直译:Hello there" and segs[0].en == "Hello there"
     assert [FakeClient.step(p) for p in fake.prompts] == ["summary", "direct"]
 
@@ -106,7 +117,7 @@ def test_translate_chinese_source_proofreads_zh(monkeypatch):
     _use_fake(monkeypatch)
     segs = [Segment(1, 0, 1, "今天天汽很好")]
     translator.translate(segs, source_lang="zh")
-    assert segs[0].zh == "校:今天天汽很好" and segs[0].en == "en意译:今天天汽很好"
+    assert segs[0].zh == "校:今天天汽很好" and segs[0].en == "en意译:校:今天天汽很好"
 
 
 def test_translate_zh_target_only_proofreads(monkeypatch):
@@ -114,14 +125,14 @@ def test_translate_zh_target_only_proofreads(monkeypatch):
     segs = [Segment(1, 0, 1, "今天天气很好")]
     translator.translate(segs, target="zh", source_lang="zh")
     assert segs[0].zh == "校:今天天气很好" and segs[0].en == ""
-    assert [FakeClient.step(p) for p in fake.prompts] == ["summary", "proofread"]
+    assert [FakeClient.step(p) for p in fake.prompts] == ["summary", "correct"]
 
 
 def test_translate_retries_and_falls_back(monkeypatch):
     fake = _use_fake(monkeypatch, drop_first="direct", fail={"free"})
     segs = [Segment(i, i, i + 1, f"line{i}") for i in range(1, 4)]
     translator.translate(segs, source_lang="en")
-    assert [s.zh for s in segs] == ["zh直译:line1", "zh直译:line2", "zh直译:line3"]  # polish failed -> direct kept
+    assert [s.zh for s in segs] == ["zh直译:校:line1", "zh直译:校:line2", "zh直译:校:line3"]  # polish failed -> direct kept
     assert [FakeClient.step(p) for p in fake.prompts].count("direct") == 2  # incomplete answer retried
 
 
@@ -166,7 +177,7 @@ def test_full_job_flow(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
     monkeypatch.setattr(
         main.transcriber, "transcribe",
-        lambda path, language=None, on_progress=None: ([Segment(1, 0, 2, "Hello")], "en"),
+        lambda path, language=None, on_progress=None, **kw: ([Segment(1, 0, 2, "Hello")], "en"),
     )
 
     def fake_translate(segments, api_key=None, on_progress=None, **kw):
@@ -186,7 +197,7 @@ def test_full_job_flow(monkeypatch, tmp_path):
         if job["status"] in ("done", "error"):
             break
         time.sleep(0.05)
-    assert job["status"] == "done", job
+    assert job["status"] == "done", job.get("error")
 
     r = client.put(f"/api/jobs/{job_id}/segments", json={"segments": [{"id": 1, "zh": "您好"}]})
     assert r.status_code == 200
@@ -311,7 +322,7 @@ def test_zh_target_works_without_key(monkeypatch, tmp_path):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     seen = {}
 
-    def fake_transcribe(path, language=None, on_progress=None):
+    def fake_transcribe(path, language=None, on_progress=None, **kw):
         seen["language"] = language
         return [Segment(1, 0, 2, "大家好")], "zh"
 
@@ -327,7 +338,7 @@ def test_zh_target_works_without_key(monkeypatch, tmp_path):
         if job["status"] in ("done", "error"):
             break
         time.sleep(0.05)
-    assert job["status"] == "done", job
+    assert job["status"] == "done", job.get("error")
     assert seen["language"] == "zh" and job["target"] == "zh"
     assert job["segments"][0]["zh"] == "大家好"
     assert client.get(f"/api/jobs/{job_id}/subtitle.lrc?mode=zh").text == "[00:00.00]大家好\n[00:02.00]\n"
@@ -414,7 +425,7 @@ def test_burn_api(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
     monkeypatch.setattr(main, "EXPORT_DIR", tmp_path / "exports")
     monkeypatch.setattr(main.transcriber, "transcribe",
-                        lambda path, language=None, on_progress=None: ([Segment(1, 0, 1, "hi")], "en"))
+                        lambda path, language=None, on_progress=None, **kw: ([Segment(1, 0, 1, "hi")], "en"))
     monkeypatch.setattr(main.translator, "translate", lambda segments, **kw: {"theme": "", "terms": []})
 
     def fake_burn(src, dst, segments, mode, on_progress=None):
@@ -484,3 +495,266 @@ def test_audio_track_keeps_late_start(tmp_path):
     with av.open(str(out_path)) as c:
         first = next(p for p in c.demux(audio=0) if p.pts is not None)
         assert abs(float(first.pts * first.time_base) - 1.5) < 0.1
+
+
+def test_netflix_timing():
+    from app.timing import netflix_timing
+
+    segs = [
+        Segment(1, 1.0, 1.3, "Hi", zh="你好", en="Hi"),  # too short -> at least 5/6 s
+        Segment(2, 2.4, 3.0, "x", zh="这一句比较长需要更多的时间来阅读完整内容", en="A longer line that needs more time"),
+        Segment(3, 6.0, 7.0, "y", zh="下一句", en="Next"),
+        Segment(4, 7.2, 8.0, "z", zh="最后", en="Last"),
+    ]
+    out = netflix_timing(segs, fps=25)
+    frame = 1 / 25
+    assert out[0].end == round(1.0 + 1.0, 3) or out[0].end - out[0].start >= 5 / 6 - 1e-9
+    assert out[0].end <= out[1].start - 2 * frame + 1e-9  # 2-frame gap kept
+    # reading speed: 20 Chinese characters at 9 cps need about 2.2 s
+    assert out[1].end - out[1].start >= 20 / 9 - frame
+    # gap under 0.5 s is closed to exactly 2 frames
+    assert abs(out[2].end - (out[3].start - 2 * frame)) < 1e-6
+    for s in out:  # on the frame grid
+        assert abs(s.start * 25 - round(s.start * 25)) < 1e-6 and abs(s.end * 25 - round(s.end * 25)) < 1e-6
+
+
+def test_netflix_timing_never_overlaps_or_exceeds_7s():
+    from app.timing import MAX_DURATION, netflix_timing
+
+    segs = [Segment(i, i * 0.9, i * 0.9 + 0.5, "w", zh="字" * 40) for i in range(1, 6)]
+    segs.append(Segment(9, 20.0, 20.5, "w", zh="字" * 200))
+    out = netflix_timing(segs, fps=24)
+    for a, b in zip(out, out[1:]):
+        assert a.end < b.start
+    assert out[-1].end - out[-1].start <= MAX_DURATION + 1e-6
+
+
+def test_netflix_line_wrap():
+    from app.timing import wrap
+
+    assert wrap("Short line") == ["Short line"]
+    top, bottom = wrap("This subtitle line is clearly much longer than forty-two characters")
+    assert len(top) <= 42 and len(bottom) <= 42 and len(top) <= len(bottom) + 6
+    assert wrap("我们今天要讲的内容非常多，包括语音识别和机器翻译") == ["我们今天要讲的内容非常多，", "包括语音识别和机器翻译"]
+    srt = to_srt([Segment(1, 0, 2, "x", zh="我们今天要讲的内容非常多，包括语音识别和机器翻译", en="e")], "zh")
+    assert "非常多，\n包括" in srt  # single-language files are wrapped
+    assert "非常多，包括" in to_srt([Segment(1, 0, 2, "x", zh="我们今天要讲的内容非常多，包括语音识别和机器翻译", en="e")])
+
+
+def test_transcribe_options(monkeypatch):
+    transcriber = _patch_whisper(monkeypatch)
+    seen = {}
+    original = FakeWhisper.transcribe
+
+    def spy(self, audio, **kwargs):
+        seen.update(kwargs)
+        return original(self, audio, **kwargs)
+
+    monkeypatch.setattr(FakeWhisper, "transcribe", spy)
+    transcriber.transcribe("x.mp3", model="large-v3-turbo", hotwords=["DeepSeek", "VideoLingo"])
+    assert seen["hotwords"] == "DeepSeek VideoLingo" and seen["condition_on_previous_text"] is False
+    assert seen["word_timestamps"] is True
+    assert FakeWhisper.created[-1] == ("cpu", "int8")
+
+
+def _fake_tts(monkeypatch, calls=None):
+    """edge-tts stand-in: a 440 Hz tone, 0.25 s per character, shorter at a faster rate."""
+    import math
+    import struct
+    import wave
+
+    from app import dub
+
+    def synthesize(text, voice, path, rate=0):
+        if calls is not None:
+            calls.append((text, voice, rate))
+        seconds = len(text) * 0.25 / (1 + rate / 100)
+        n = int(seconds * 24000)
+        with wave.open(path, "wb") as w:  # decode_audio sniffs the format, the .mp3 name doesn't matter
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / 24000))) for i in range(n)))
+
+    monkeypatch.setattr(dub, "synthesize", synthesize)
+    return dub
+
+
+def test_dub_video_keeps_picture_and_fits_speech(monkeypatch, tmp_path):
+    import av
+    import numpy as np
+
+    calls = []
+    dub = _fake_tts(monkeypatch, calls)
+    src = _make_media(tmp_path, [
+        "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=6:r=10",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "6", "-shortest", "-pix_fmt", "yuv420p",
+    ], "in.mp4")
+    segs = [
+        Segment(1, 0.5, 2.0, "a", zh="你好"),  # 0.5 s of speech, fits
+        Segment(2, 3.0, 4.0, "b", zh="这一句非常非常长需要加快语速"),  # 3.5 s of speech for a 1.95 s slot
+        Segment(3, 5.0, 5.5, "c", zh="好"),
+    ]
+    out = dub.dub(str(src), tmp_path / "job_dubbed", segs, "zh", "zh-CN-XiaoxiaoNeural", bg_volume=0.2)
+    assert out.suffix == ".mp4"
+    rates = [rate for text, _, rate in calls if text.startswith("这一句")]
+    assert rates == [0, dub.MAX_SPEEDUP]  # re-synthesised at the fastest allowed rate
+    with av.open(str(out)) as c, av.open(str(src)) as s:
+        assert c.streams.video[0].codec_context.name == "h264"
+        assert c.streams.video[0].frames == s.streams.video[0].frames  # picture copied, not re-encoded
+        assert c.streams.audio
+    from app.transcriber import decode_audio
+
+    audio = decode_audio(str(out), 16000)
+    loud = lambda a, b: float(np.abs(audio[int(a * 16000):int(b * 16000)]).mean())  # noqa: E731
+    assert loud(0.6, 0.9) > 0.1 and loud(0.1, 0.4) < 0.01  # speech starts with the subtitle
+    assert loud(4.5, 4.8) > 0.05 and loud(4.96, 4.995) < 0.01  # still too long: cut before the next line
+    assert loud(5.05, 5.2) > 0.1  # next line starts on time
+
+
+def test_dub_audio_only_gives_mp3_and_burn_gives_video(monkeypatch, tmp_path):
+    import av
+
+    dub = _fake_tts(monkeypatch)
+    src = _make_media(tmp_path, ["-f", "lavfi", "-i", "sine=duration=3"], "in.mp3")
+    segs = [Segment(1, 0.5, 2.0, "Hello", zh="你好", en="Hello")]
+    out = dub.dub(str(src), tmp_path / "a_dubbed", segs, "en", "en-US-AriaNeural")
+    assert out.suffix == ".mp3"
+    out = dub.dub(str(src), tmp_path / "b_dubbed", segs, "zh", "zh-CN-XiaoxiaoNeural", burn_mode="bilingual")
+    with av.open(str(out)) as c:
+        assert out.suffix == ".mp4" and c.streams.video and c.streams.audio
+
+
+def test_dub_api(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main, "EXPORT_DIR", tmp_path / "exports")
+    monkeypatch.setattr(main.transcriber, "transcribe",
+                        lambda path, language=None, on_progress=None, **kw: ([Segment(1, 0, 1, "hi")], "en"))
+    monkeypatch.setattr(main.translator, "translate", lambda segments, **kw: {"theme": "", "terms": []})
+    seen = {}
+
+    def fake_dub(src, stem, segments, lang, voice, bg_volume, burn_mode, on_progress=None):
+        seen.update(lang=lang, voice=voice, bg=bg_volume, burn=burn_mode)
+        out = Path(str(stem) + ".mp4")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"dubbed")
+        return out
+
+    monkeypatch.setattr(main, "dub", fake_dub)
+    client = TestClient(main.app)
+    assert "zh-CN-XiaoxiaoNeural" in str(client.get("/api/voices").json())
+    job_id = client.post("/api/jobs", files={"file": ("a.mp4", b"x")}, data={"api_key": "k"}).json()["id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{job_id}").json()["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert client.post(f"/api/jobs/{job_id}/dub", json={"lang": "fr"}).status_code == 400
+    assert client.post(f"/api/jobs/{job_id}/dub", json={"lang": "zh", "voice": "nope"}).status_code == 400
+    r = client.post(f"/api/jobs/{job_id}/dub", json={"lang": "en", "bg_volume": 5, "burn_mode": "en"})
+    assert r.status_code == 200
+    for _ in range(50):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["dub"]["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert seen == {"lang": "en", "voice": "en-US-AriaNeural", "bg": 1.0, "burn": "en"}
+    r = client.get(f"/api/jobs/{job_id}/dubbed")
+    assert r.content == b"dubbed" and "a.en.dubbed.mp4" in r.headers["content-disposition"]
+
+
+def test_translate_fields_for_images(monkeypatch):
+    fake = _use_fake(monkeypatch)
+    segs = [Segment(1, 0, 1, "Hello")]
+    translator.translate(segs, source_lang="en", fields=("zh",))
+    assert segs[0].zh == "zh意译:校:Hello" and segs[0].en == ""
+    assert [FakeClient.step(p) for p in fake.prompts] == ["summary", "correct", "direct", "free"]
+    segs = [Segment(1, 0, 1, "こんにちは")]
+    translator.translate(segs, source_lang="ja", fields=("zh", "en"))
+    assert segs[0].zh.startswith("zh意译") and segs[0].en.startswith("en意译")
+
+
+def test_image_language_guess_and_text():
+    from app.image_translate import guess_language, to_text
+
+    assert guess_language(["Welcome", "営業時間は六時から"]) == "ja"  # kana -> Japanese
+    assert guess_language(["안녕하세요"]) == "ko"
+    assert guess_language(["欢迎光临本店"]) == "zh"
+    assert guess_language(["Open daily"]) == "en"
+    lines = [{"text": "Open", "zh": "营业", "en": "Open"}]
+    assert to_text(lines, "bilingual") == "Open\n营业\n"
+    assert to_text(lines, "zh") == "营业\n"
+
+
+def _sign(tmp_path):
+    import pytest
+    from PIL import Image, ImageDraw, ImageFont
+
+    from app.burn import find_font
+
+    try:
+        font = ImageFont.truetype(find_font(), 40)
+    except RuntimeError:
+        pytest.skip("no CJK font installed")
+    img = Image.new("RGB", (700, 200), (245, 240, 230))
+    ImageDraw.Draw(img).text((30, 30), "Fresh fruit juice", font=font, fill=(180, 20, 20))
+    path = tmp_path / "sign.png"
+    img.save(path)
+    return path
+
+
+def test_image_render_replaces_text_in_place(tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    from app.image_translate import render
+
+    path = _sign(tmp_path)
+    lines = [{"box": [[28, 28], [400, 28], [400, 80], [28, 80]], "text": "Fresh fruit juice", "zh": "鲜榨果汁", "en": ""}]
+    render(str(path), lines, "zh", str(tmp_path / "zh.png"))
+    out = np.asarray(Image.open(tmp_path / "zh.png").convert("RGB")).astype(int)
+    src = np.asarray(Image.open(path).convert("RGB")).astype(int)
+    assert not np.array_equal(out[28:80, 28:400], src[28:80, 28:400])  # text replaced
+    reds = out[28:80, 28:400][(out[28:80, 28:400, 0] > 140) & (out[28:80, 28:400, 1] < 80)]
+    assert len(reds) > 20  # drawn in the original (red) text colour
+    assert np.array_equal(out[120:, :], src[120:, :])  # rest of the image untouched
+    render(str(path), lines, "bilingual", str(tmp_path / "bi.png"))
+    bi = np.asarray(Image.open(tmp_path / "bi.png").convert("RGB")).astype(int)
+    assert np.array_equal(bi[28:80, 28:400], src[28:80, 28:400])  # original kept
+    assert (bi[82:130, 28:200].mean(axis=2) < 80).mean() > 0.3  # dark label below it
+
+
+def test_image_ocr_real_engine(tmp_path):
+    import pytest
+
+    pytest.importorskip("rapidocr")
+    from app.image_translate import ocr
+
+    lines = ocr(str(_sign(tmp_path)))
+    assert lines and "fruit" in lines[0]["text"].lower()
+
+
+def test_image_api(monkeypatch, tmp_path):
+    from app import image_translate
+
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main, "EXPORT_DIR", tmp_path / "exports")
+    monkeypatch.setattr(image_translate, "ocr", lambda path, lang="auto": [
+        {"box": [[28, 28], [400, 28], [400, 80], [28, 80]], "text": "Fresh fruit juice", "score": 0.99}])
+    _use_fake(monkeypatch)
+    client = TestClient(main.app)
+    sign = _sign(tmp_path)
+    assert client.post("/api/images", files={"file": ("a.gif", b"x")}, data={"api_key": "k"}).status_code == 400
+    assert client.post("/api/images", files={"file": ("a.png", b"x")}, data={"api_key": "k", "target": "x"}).status_code == 400
+    image_id = client.post("/api/images", files={"file": ("menu.png", sign.read_bytes())},
+                           data={"api_key": "k", "target": "zh"}).json()["id"]
+    for _ in range(100):
+        item = client.get(f"/api/images/{image_id}").json()
+        if item["status"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert item["status"] == "done", item.get("error")
+    assert item["lines"][0]["zh"] == "zh意译:校:Fresh fruit juice" and item["language"] == "en"
+    r = client.get(f"/api/images/{image_id}/translated.png?download=true")
+    assert r.headers["content-type"] == "image/png" and "menu.translated.png" in r.headers["content-disposition"]
+    assert client.get(f"/api/images/{image_id}/text.txt").text == "zh意译:校:Fresh fruit juice\n"
+    assert client.get(f"/api/images/{image_id}/source").content == sign.read_bytes()

@@ -40,12 +40,23 @@ def cue_lines(seg: Segment, mode: str) -> list[str]:
     raise ValueError(f"unknown subtitle mode: {mode}")
 
 
+def display_lines(seg: Segment, mode: str) -> list[str]:
+    """Lines as shown in subtitle files. Single-language subtitles are wrapped to
+    Netflix line lengths; bilingual ones keep one line per language (else four lines)."""
+    lines = cue_lines(seg, mode)
+    if mode in ("zh", "en"):
+        from .timing import wrap
+
+        return [part for line in lines for part in wrap(line)]
+    return lines
+
+
 def to_srt(segments: list[Segment], mode: str = "bilingual") -> str:
     blocks = []
     for i, seg in enumerate(segments, 1):
         blocks.append(
             f"{i}\n{_timestamp(seg.start, ',')} --> {_timestamp(seg.end, ',')}\n"
-            + "\n".join(cue_lines(seg, mode))
+            + "\n".join(display_lines(seg, mode))
         )
     return "\n\n".join(blocks) + "\n"
 
@@ -55,7 +66,7 @@ def to_vtt(segments: list[Segment], mode: str = "bilingual") -> str:
     for seg in segments:
         blocks.append(
             f"{_timestamp(seg.start, '.')} --> {_timestamp(seg.end, '.')}\n"
-            + "\n".join(cue_lines(seg, mode))
+            + "\n".join(display_lines(seg, mode))
         )
     return "\n\n".join(blocks) + "\n"
 

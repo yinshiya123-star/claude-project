@@ -25,15 +25,19 @@ _cuda_failed = False
 ZH_INITIAL_PROMPT = "以下是普通话的句子，使用简体中文，并带有标点符号。"
 
 
-def _get_model(device: str):
+# Choices offered on the web page: speed versus accuracy.
+MODELS = ("small", "medium", "large-v3-turbo")
+
+
+def _get_model(device: str, name: str | None = None):
+    name = name or os.getenv("WHISPER_MODEL", "small")
     with _model_lock:
-        if device not in _models:
+        if (device, name) not in _models:
             from faster_whisper import WhisperModel
 
-            name = os.getenv("WHISPER_MODEL", "small")
             compute_type = os.getenv("WHISPER_COMPUTE_TYPE") or ("int8" if device == "cpu" else "default")
-            _models[device] = WhisperModel(name, device=device, compute_type=compute_type)
-        return _models[device]
+            _models[(device, name)] = WhisperModel(name, device=device, compute_type=compute_type)
+        return _models[(device, name)]
 
 
 def _cuda_available() -> bool:
@@ -91,13 +95,19 @@ def transcribe(
     path: str,
     language: str | None = None,
     on_progress: Callable[[float], None] | None = None,
+    model: str | None = None,
+    hotwords: list[str] | None = None,
 ) -> tuple[list[Segment], str]:
-    """Transcribe an audio/video file. Returns (segments, detected_language)."""
+    """Transcribe an audio/video file. Returns (segments, detected_language).
+
+    `hotwords` (e.g. names from the user's glossary) bias recognition towards
+    those spellings.
+    """
     global _cuda_failed
     audio = decode_audio(path)
     for device in _devices():
         try:
-            return _transcribe(_get_model(device), audio, language, on_progress)
+            return _transcribe(_get_model(device, model), audio, language, on_progress, hotwords)
         except Exception:
             if device != "cuda":
                 raise
@@ -107,17 +117,24 @@ def transcribe(
     raise AssertionError("unreachable")  # the CPU attempt either returns or raises
 
 
-def _transcribe(model, audio, language, on_progress) -> tuple[list[Segment], str]:
+def _transcribe(model, audio, language, on_progress, hotwords=None) -> tuple[list[Segment], str]:
     seg_iter, info = model.transcribe(
         audio,
         language=language or None,
         initial_prompt=ZH_INITIAL_PROMPT if language == "zh" else None,
+        hotwords=" ".join(hotwords) if hotwords else None,
+        # Don't feed the previous window's text back in: stops one mistake from
+        # spreading and the repetition loops Whisper is known for.
+        condition_on_previous_text=False,
+        # Shorter silences split speech, so timestamps hug the words more tightly.
+        vad_parameters={"min_silence_duration_ms": 700},
         # Auto mode: detect the language per segment, so mixed-language audio works.
         multilingual=language is None,
         # Word timings let segmenter.regroup() rebuild whole sentences.
         word_timestamps=True,
         vad_filter=True,
         beam_size=5,
+        best_of=5,
     )
     duration = info.duration or 0
     words: list[Word] = []

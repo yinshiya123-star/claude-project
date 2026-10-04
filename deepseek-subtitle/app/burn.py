@@ -12,7 +12,7 @@ import subprocess
 from functools import lru_cache
 from typing import Callable
 
-from .media import AudioTrack
+from .media import AudioFeeder, AudioTrack, picture_stream as _picture_stream
 from .subtitles import Segment, cue_lines
 
 # Common CJK-capable system fonts, tried in order (override with SUBTITLE_FONT).
@@ -168,16 +168,6 @@ def _rotate(arr, rotation):
     return np.ascontiguousarray(np.rot90(arr, k)) if k else arr
 
 
-def _picture_stream(container):
-    """First real video stream; cover art in MP3/M4A files (attached_pic) doesn't count."""
-    import av
-
-    for stream in container.streams.video:
-        if not stream.disposition & av.stream.Disposition.attached_pic:
-            return stream
-    return None
-
-
 def _video_size(src: str) -> tuple[int, int] | None:
     """(width, height) of the first frame as displayed, i.e. after rotation."""
     import av
@@ -198,7 +188,10 @@ def burn(
     segments: list[Segment],
     mode: str,
     on_progress: Callable[[float], None] | None = None,
+    audio_source: str | None = None,
 ) -> None:
+    """Burn `segments` into `src`. `audio_source` replaces the original sound
+    (used for dubbing); an empty `segments` list re-encodes without subtitles."""
     import av
     import numpy as np
 
@@ -208,7 +201,7 @@ def burn(
     with av.open(src) as inp:
         vin = _picture_stream(inp)
         ain = inp.streams.audio[0] if inp.streams.audio else None
-        if vin is None and ain is None:
+        if vin is None and ain is None and audio_source is None:
             raise RuntimeError("文件里既没有画面也没有声音")
         duration = float(inp.duration / av.time_base) if inp.duration else max((s.end for s in segments), default=0)
         tracker = _ActiveSegment(segments)
@@ -227,7 +220,10 @@ def burn(
             renderer = SubtitleRenderer(vout.width, vout.height)
             last_pts = -1
 
-            audio = AudioTrack(out, "aac", 48000, 192000) if ain is not None else None
+            audio = AudioTrack(out, "aac", 48000, 192000) if (ain is not None or audio_source) else None
+            feeder = AudioFeeder(audio_source, audio) if audio_source else None
+            if feeder:
+                ain = None  # the replacement sound is used instead of the original
 
             def encode_video(rgb, t):
                 nonlocal last_pts
@@ -242,11 +238,14 @@ def burn(
                 frame.pts, last_pts = pts, pts
                 for packet in vout.encode(frame):
                     out.mux(packet)
+                if feeder:
+                    feeder.until(t)
                 if on_progress and duration:
                     on_progress(min(1.0, t / duration))
 
             streams = [s for s in (vin, ain) if s is not None]  # vin is None for audio-only
-            for packet in inp.demux(*streams):
+            # demux() without arguments would read every stream: skip it when nothing is needed
+            for packet in inp.demux(*streams) if streams else ():
                 try:
                     frames = packet.decode()
                 except av.error.InvalidDataError:
@@ -268,7 +267,9 @@ def burn(
 
             for packet in vout.encode(None):
                 out.mux(packet)
+            if feeder:
+                feeder.close()
             if audio is not None:
-                audio.add(None)
+                audio.add(None)  # flush the encoder
     if on_progress:
         on_progress(1.0)

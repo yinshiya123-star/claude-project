@@ -39,6 +39,53 @@ class AudioTrack:
             self.out.mux(self.stream.encode(None))
 
 
+class AudioFeeder:
+    """Feeds the audio of a separate file (e.g. a dubbing track) into an
+    AudioTrack, a little at a time as the video advances, so the muxer can
+    interleave the two."""
+
+    def __init__(self, path: str, track: AudioTrack):
+        import av
+
+        self.container = av.open(path)
+        self.frames = self.container.decode(audio=0)
+        self.track = track
+        self.pending = next(self.frames, None)
+
+    def until(self, t: float | None) -> None:
+        """Encode audio up to time t (everything that is left for None)."""
+        while self.pending is not None and (t is None or self.pending.time is None or self.pending.time <= t):
+            self.track.add(self.pending)
+            self.pending = next(self.frames, None)
+
+    def close(self) -> None:
+        self.until(None)
+        self.container.close()
+
+
+def picture_stream(container):
+    """First real video stream; cover art in MP3/M4A files (attached_pic) doesn't count."""
+    import av
+
+    for stream in container.streams.video:
+        if not stream.disposition & av.stream.Disposition.attached_pic:
+            return stream
+    return None
+
+
+def video_fps(path: str) -> float | None:
+    """Frame rate of the video, None for audio-only files."""
+    import av
+
+    try:
+        with av.open(path) as container:
+            stream = picture_stream(container)
+            rate = stream and (stream.average_rate or stream.guessed_rate)
+            return float(rate) if rate else None
+    except Exception:
+        return None
+
+
 def log_ffmpeg_errors() -> None:
     """Let PyAV attach FFmpeg's own error message to exceptions, so a failure
     explains itself instead of only saying "Invalid argument"."""

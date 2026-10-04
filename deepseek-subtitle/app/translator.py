@@ -12,8 +12,9 @@ Apache-2.0); the prompts below are adapted from its core/prompts.py:
    fails, the faithful translation is kept.
 
 Changes from VideoLingo: chunks are translated into Chinese and/or English to
-fill the zh / en fields, a proofreading pass handles Chinese sources, terms
-carry both Chinese and English, and requests use DeepSeek's JSON mode.
+fill the zh / en fields, a correction pass first fixes recognition errors in
+the original language, terms carry both Chinese and English, and requests use
+DeepSeek's JSON mode.
 """
 
 from __future__ import annotations
@@ -216,17 +217,19 @@ Please use a two-step thinking process to handle the text line by line:
 """.strip()
 
 
-def proofread_prompt(lines: list[str], shared: str) -> str:
+def correction_prompt(lines: list[str], src_lang: str, shared: str) -> str:
+    chinese = "Use Simplified Chinese and add proper Chinese punctuation.\n" if src_lang == "Chinese" else ""
     return f"""
 ## Role
-You are a professional Chinese subtitle proofreader.
+You are a professional {src_lang} proofreader who fixes automatic recognition output.
 
 ## Task
-The subtitles below come from speech recognition of a mostly Chinese video. Proofread them line by line into the "zh" field:
-1. Fix homophones, typos and obvious recognition errors using the context and the terms
-2. Use Simplified Chinese and add proper punctuation
-3. A line in another language is translated into Simplified Chinese
+The lines below come from automatic speech recognition or OCR. Correct them line by line into the "fixed" field, in the original language:
+1. Fix misheard words, homophones, typos and wrong names using the context, the summary and the terms
+2. Fix punctuation and capitalization
+3. {chinese}Keep each line in its own language; do not translate
 4. Do not rewrite, expand or shorten the meaning; keep the spoken style; never merge or split lines
+5. If a line is already correct, return it unchanged
 
 {shared}
 
@@ -236,7 +239,7 @@ The subtitles below come from speech recognition of a mostly Chinese video. Proo
 </subtitles>
 
 ## Output in only JSON format and no other text
-{_numbered(lines, {"zh": "proofread Simplified Chinese line"})}
+{_numbered(lines, {"fixed": "corrected line"})}
 """.strip()
 
 
@@ -325,9 +328,9 @@ def _run_chunk(client: _Client, task: str, lines: list[str], idx: list[int], src
         _matched_terms(terms, "\n".join(part)),
     )
     n = len(part)
-    if task == "proofread":
-        data = client.ask_json(proofread_prompt(part, shared), _lines_valid(n, "zh"), "校对", temperature=0.7)
-        return _field(data, n, "zh")
+    if task == "correct":
+        data = client.ask_json(correction_prompt(part, src_lang, shared), _lines_valid(n, "fixed"), "校正", temperature=0.7)
+        return _field(data, n, "fixed")
     target = TARGETS[task]
     data = client.ask_json(faithfulness_prompt(part, src_lang, target, shared), _lines_valid(n, "direct"), "翻译")
     direct = _field(data, n, "direct")
@@ -348,51 +351,71 @@ def translate(
     source_lang: str | None = None,
     reflect: bool = True,
     custom_terms: list[dict] | None = None,
+    correct: bool = True,
+    fields: tuple[str, ...] | None = None,
 ) -> dict:
     """Fill in `zh` and `en` for every segment, in place; returns {"theme", "terms"}.
 
-    target="bilingual": Chinese + English. A Chinese source is proofread into
-    zh and translated into en; an English source keeps its text as en.
-    target="zh": proofread into zh only, en stays empty.
+    1. Summarise and extract terms.
+    2. correct=True: fix recognition errors in the original language (seg.text).
+    3. target="bilingual": Chinese + English; the source language keeps its
+       (corrected) text, the other one(s) are translated. target="zh": the
+       corrected Chinese text only, en stays empty.
+    `fields` overrides the target with the exact fields to fill, e.g. ("zh",)
+    to translate into Chinese only (used for images).
     """
     if not segments:
         return {"theme": "", "terms": []}
     client = _Client(api_key)
     lines = [s.text for s in segments]
     src_lang = LANG_NAMES.get(source_lang or "", source_lang or "the original language")
+    chunks = chunk_lines(lines)
 
-    if target == "zh":
-        tasks = {"zh": "proofread"}
+    theme, terms = summarize(client, lines, src_lang, custom_terms or [])
+    if fields is not None:
+        tasks = {f: f for f in fields if f != source_lang}
+    elif target == "zh":
+        tasks = {}
     elif source_lang == "zh":
-        tasks = {"zh": "proofread", "en": "en"}
+        tasks = {"en": "en"}
     elif source_lang == "en":
         tasks = {"zh": "zh"}
     else:
         tasks = {"zh": "zh", "en": "en"}
 
-    theme, terms = summarize(client, lines, src_lang, custom_terms or [])
-    chunks = chunk_lines(lines)
-    jobs = [(field, task, idx) for field, task in tasks.items() for idx in chunks]
+    total = len(chunks) * (int(correct) + len(tasks)) or 1
     done, lock = [0], threading.Lock()
     if on_progress:
         on_progress(0.1)
 
-    def work(job):
-        field, task, idx = job
-        result = _run_chunk(client, task, lines, idx, src_lang, theme, terms, reflect)
-        with lock:
-            done[0] += 1
-            if on_progress:
-                on_progress(0.1 + 0.9 * done[0] / len(jobs))
-        return field, idx, result
+    def run(jobs):
+        def work(job):
+            field, task, idx = job
+            result = _run_chunk(client, task, lines, idx, src_lang, theme, terms, reflect)
+            with lock:
+                done[0] += 1
+                if on_progress:
+                    on_progress(0.1 + 0.9 * done[0] / total)
+            return field, idx, result
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        results = list(pool.map(work, jobs))
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            return list(pool.map(work, jobs))
+
+    if correct:
+        for _, idx, result in run([("text", "correct", idx) for idx in chunks]):
+            for i, text in zip(idx, result):
+                lines[i] = text or lines[i]
+        for seg, text in zip(segments, lines):
+            seg.text = text
 
     for seg in segments:
-        seg.zh = ""
-        seg.en = seg.text if (target == "bilingual" and source_lang == "en") else ""
-    for field, idx, result in results:
+        if fields is not None:
+            seg.zh = seg.text if ("zh" in fields and source_lang == "zh") else ""
+            seg.en = seg.text if ("en" in fields and source_lang == "en") else ""
+        else:
+            seg.zh = seg.text if (target == "zh" or source_lang == "zh") else ""
+            seg.en = seg.text if (target == "bilingual" and source_lang == "en") else ""
+    for field, idx, result in run([(f, t, idx) for f, t in tasks.items() for idx in chunks]):
         for i, text in zip(idx, result):
             setattr(segments[i], field, text or segments[i].text)
     return {"theme": theme, "terms": terms}
