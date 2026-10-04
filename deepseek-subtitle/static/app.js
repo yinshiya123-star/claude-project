@@ -60,6 +60,7 @@ $("#toggle-key").addEventListener("click", (e) => {
 let serverKey = false;
 fetch("/api/config").then((r) => r.json()).then((cfg) => {
   serverKey = cfg.server_key_configured;
+  if (cfg.clone_key_configured) $("#clone-key").placeholder = "服务端已配置硅基流动 Key，会自动克隆原声";
   if (serverKey) apiKeyInput.placeholder = "服务端已配置 Key，可留空";
   for (const select of [$("#ocr-lang"), $("#screen-lang")]) {
     for (const [value, label] of Object.entries(cfg.ocr_langs || {})) select.add(new Option(label, value));
@@ -774,7 +775,7 @@ $("#screen-btn").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- AI dubbing
 const DUB_LABELS = {
-  running: (s) => `${s.progress < 0.02 ? "分析原声、匹配说话人" : s.progress < 0.7 ? "合成配音中" : "混音、合成视频中"}（${s.lang === "zh" ? "中文" : "英文"}）`,
+  running: (s) => `${s.progress < 0.02 ? (s.clone ? "分析原声、克隆说话人的声音" : "分析原声、识别说话人") : s.progress < 0.7 ? "合成配音中" : "混音、合成视频中"}（${s.lang === "zh" ? "中文" : "英文"}）`,
   done: (s) => `下载配音结果（${s.file && s.file.endsWith(".mp3") ? "MP3" : "MP4"}）`,
   url: () => `/api/jobs/${jobId}/dubbed`,
 };
@@ -810,6 +811,9 @@ function renderDub() {
   if (job.dub && job.dub.status === "running") pollTask("dub", showDub);
 }
 
+const cloneKeyInput = $("#clone-key");
+cloneKeyInput.value = store.get("siliconflow_key");
+cloneKeyInput.addEventListener("change", () => store.set("siliconflow_key", cloneKeyInput.value.trim()));
 $("#dub-bg").addEventListener("input", (e) => ($("#bg-value").textContent = `${e.target.value}%`));
 $("#dub-btn").addEventListener("click", async () => {
   if (dirty && !(await save())) return;
@@ -818,6 +822,7 @@ $("#dub-btn").addEventListener("click", async () => {
     lang: $("#dub-lang").value,
     bg_volume: Number($("#dub-bg").value) / 100,
     burn_mode: $("#dub-burn").value || null,
+    clone_key: cloneKeyInput.value.trim(),
   };
   const res = await fetch(`/api/jobs/${jobId}/dub`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -827,7 +832,7 @@ $("#dub-btn").addEventListener("click", async () => {
     $("#dub-btn").disabled = false;
     return;
   }
-  showDub({ status: "running", lang: body.lang, progress: 0 });
+  showDub({ status: "running", lang: body.lang, progress: 0, clone: !!body.clone_key });
   pollTask("dub", showDub);
 });
 

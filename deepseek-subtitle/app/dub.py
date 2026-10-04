@@ -6,9 +6,10 @@ time slot, place the clips on a timeline and merge them with the video.
 
 - Speech comes from edge-tts (Microsoft Edge's online neural voices: free, no
   key, natural Chinese and English voices). Voices are matched to the people
-  in the video automatically (voices.py): one voice per speaker, chosen by
-  gender and pitch, shifted towards the speaker's pitch, at the loudness of
-  the original line.
+  in the video automatically (voices.py): speakers are told apart by
+  voiceprint, each gets the closest voice shifted to their pitch and speed,
+  and every line follows the original line's pitch and loudness.
+- With a SiliconFlow key the speakers' own voices are cloned instead (clone.py).
 - A clip longer than its slot is synthesised again with a faster speaking rate
   (up to +60 %); whatever still doesn't fit is cut with a short fade-out.
 - The original sound can stay underneath at a chosen volume.
@@ -73,6 +74,22 @@ def synthesize(text: str, voice: str, path: str, rate: int = 0, pitch: str = "+0
         raise DubError(f"语音合成失败（需要能访问微软 Edge 语音服务）：{e}") from e
 
 
+def _speak(text: str, voice: dict, path: str, rate: int) -> None:
+    """One line with the line's voice settings: a cloned voice or an edge-tts voice."""
+    clone = voice.get("clone")
+    if clone:
+        from . import clone as cloning
+
+        try:
+            cloning.speak(clone["key"], clone["uri"], text, path, 1 + rate / 100)
+        except cloning.CloneError as e:
+            raise DubError(str(e)) from e
+        except Exception as e:
+            raise DubError(f"声音克隆合成失败（需要能访问硅基流动）：{e}") from e
+    else:
+        synthesize(text, voice["voice"], path, rate, voice["pitch"])
+
+
 def _load(path: str):
     from .transcriber import decode_audio
 
@@ -80,16 +97,18 @@ def _load(path: str):
 
 
 def _clip_for(seg: Segment, text: str, voice: dict, slot: float, tmp: str, gain: float = 1.0):
-    """Speech for one line, fitted into `slot` seconds; `voice` = {"voice", "pitch"}."""
+    """Speech for one line, fitted into `slot` seconds; `voice` = {"voice", "pitch", "rate"
+    (the speaker's speed in percent), optional "clone"}."""
     import numpy as np
 
     path = os.path.join(tmp, f"{seg.id}.mp3")
-    synthesize(text, voice["voice"], path, pitch=voice["pitch"])
+    base = voice.get("rate", 0)
+    _speak(text, voice, path, base)
     audio = _load(path)
     length = len(audio) / RATE
     if length > slot * 1.03:
-        rate = min(MAX_SPEEDUP, math.ceil((length / slot - 1) * 100) + 5)
-        synthesize(text, voice["voice"], path, rate, voice["pitch"])
+        factor = (1 + base / 100) * (length / slot) * 1.05  # speed that fits, relative to normal
+        _speak(text, voice, path, min(MAX_SPEEDUP, math.ceil((factor - 1) * 100)))
         audio = _load(path)
     rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
     if rms > 1e-4:
@@ -170,9 +189,11 @@ def _remux(src: str, audio_path: str, dst: str) -> None:
         feeder.track.add(None)
 
 
-def match_voices(src: str, segments: list[Segment], lang: str) -> tuple[dict[int, dict], dict[int, float], list[dict]]:
-    """Voice per line from the speakers in the original audio, loudness gain per line,
-    and a summary of who got which voice."""
+def match_voices(src: str, segments: list[Segment], lang: str, clone_key: str | None = None,
+                 cloned: list | None = None) -> tuple[dict[int, dict], dict[int, float], list[dict]]:
+    """Voice settings per line from the speakers in the original audio, loudness gain
+    per line, and a summary of who got which voice. With `clone_key` every speaker's
+    own voice is cloned; the created voices are appended to `cloned` as (key, uri)."""
     from . import voices
     from .transcriber import decode_audio
 
@@ -181,25 +202,48 @@ def match_voices(src: str, segments: list[Segment], lang: str) -> tuple[dict[int
     except RuntimeError:  # no sound track: one default voice
         audio = None
     if audio is None or not len(audio):
-        speakers = [{"id": 0, "f0": None, "gender": "female", "lines": len(segments)}]
-        labels, loud = {s.id: 0 for s in segments}, {}
+        if clone_key:
+            raise DubError("原视频没有声音，无法克隆说话人的声音")
+        found = {"speakers": [{"id": 0, "f0": None, "gender": "female", "lines": len(segments), "speed": None}],
+                 "labels": {s.id: 0 for s in segments}, "loudness": {}, "pitch": {}, "speed": {}}
     else:
         found = voices.analyze_speakers(audio, segments)
-        speakers, labels, loud = found["speakers"], found["labels"], found["loudness"]
-    chosen = voices.auto_voices(speakers, lang)
-    per_line = {s.id: chosen[labels[s.id]] for s in segments}
+    chosen = voices.auto_voices(found["speakers"], lang)
+    per_line = voices.line_voices(found, chosen)
+    loud = found["loudness"]
     levels = sorted(v for v in loud.values() if v > 1e-4)
     median = levels[len(levels) // 2] if levels else 0
     gains = {sid: min(1.6, max(0.6, v / median)) for sid, v in loud.items() if median and v > 1e-4}
-    return per_line, gains, voices.describe(speakers, chosen)
+    summary = voices.describe(found["speakers"], chosen)
+    if clone_key:
+        from . import clone
+
+        for n, spk in enumerate(found["speakers"]):
+            ids = [sid for sid, label in found["labels"].items() if label == spk["id"]]
+            ref = clone.reference(audio, segments, ids, loud)
+            if ref is None:
+                continue  # nothing to clone from: keep the matched edge voice
+            try:
+                uri = clone.upload(clone_key, ref[0], ref[1], f"dub-speaker-{n + 1}")
+            except clone.CloneError as e:
+                raise DubError(str(e)) from e
+            except Exception as e:
+                raise DubError(f"上传参考音频失败（需要能访问硅基流动）：{e}") from e
+            if cloned is not None:
+                cloned.append((clone_key, uri))
+            for sid in ids:
+                per_line[sid] = {**per_line[sid], "clone": {"key": clone_key, "uri": uri}}
+            summary[n]["voice"] = f"克隆原声（参考 {len(ref[1])} 字）"
+    return per_line, gains, summary
 
 
 def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str | None = None,
         bg_volume: float = 0.2, burn_mode: str | None = None,
-        on_progress: Callable[[float], None] | None = None) -> tuple[Path, list[dict]]:
+        on_progress: Callable[[float], None] | None = None, clone_key: str | None = None) -> tuple[Path, list[dict]]:
     """Dub `src`; returns (output file, speaker summary). The output is MP4 for videos or
     burned output, MP3 otherwise. Voices are matched to the speakers automatically unless
-    `voice` forces one voice for every line.
+    `voice` forces one voice for every line; with `clone_key` (SiliconFlow) the speakers'
+    own voices are cloned.
 
     `dst_stem` has no extension (e.g. exports/<job>_dubbed); it is added here.
     """
@@ -217,12 +261,19 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
         raise DubError("没有可配音的字幕文本")
 
     step = (lambda a, b: (lambda p: on_progress(a + (b - a) * p))) if on_progress else (lambda a, b: None)
-    if voice:
-        per_line, gains = {s.id: {"voice": voice, "pitch": "+0Hz"} for s in segments}, {}
-        summary = [{"speaker": "全部台词", "voice": voice}]
-    else:
-        per_line, gains, summary = match_voices(src, segments, lang)
-    speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains)
+    cloned: list = []
+    try:
+        if voice:
+            per_line, gains = {s.id: {"voice": voice, "pitch": "+0Hz", "rate": 0} for s in segments}, {}
+            summary = [{"speaker": "全部台词", "voice": voice}]
+        else:
+            per_line, gains, summary = match_voices(src, segments, lang, clone_key, cloned)
+        speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains)
+    finally:
+        from . import clone
+
+        for key, uri in cloned:
+            clone.delete(key, uri)
     if has_audio and bg_volume > 0:
         original = _load(src) * float(bg_volume)
         mixed = np.zeros(max(len(speech), len(original)), dtype=np.float32)

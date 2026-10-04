@@ -634,8 +634,8 @@ def test_dub_api(monkeypatch, tmp_path):
     monkeypatch.setattr(main.translator, "translate", lambda segments, **kw: {"theme": "", "terms": []})
     seen = {}
 
-    def fake_dub(src, stem, segments, lang, voice, bg_volume, burn_mode, on_progress=None):
-        seen.update(lang=lang, voice=voice, bg=bg_volume, burn=burn_mode)
+    def fake_dub(src, stem, segments, lang, voice, bg_volume, burn_mode, on_progress=None, clone_key=None):
+        seen.update(lang=lang, voice=voice, bg=bg_volume, burn=burn_mode, clone=clone_key)
         out = Path(str(stem) + ".mp4")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"dubbed")
@@ -658,7 +658,7 @@ def test_dub_api(monkeypatch, tmp_path):
         if job["dub"]["status"] == "done":
             break
         time.sleep(0.05)
-    assert seen == {"lang": "en", "voice": None, "bg": 1.0, "burn": "en"}  # no voice: matched automatically
+    assert seen == {"lang": "en", "voice": None, "bg": 1.0, "burn": "en", "clone": None}  # no voice: matched automatically
     assert job["dub"]["speakers"][0]["voice"] == "云健"
     r = client.get(f"/api/jobs/{job_id}/dubbed")
     assert r.content == b"dubbed" and "a.en.dubbed.mp4" in r.headers["content-disposition"]
@@ -1106,3 +1106,147 @@ def test_screen_text_runs_automatically_after_subtitles(monkeypatch, tmp_path):
     assert job["screen"]["status"] == "done" and job["screen"]["target"] == "orig_zh"
     assert seen["lang"] == "ko"  # OCR model follows the spoken language
     assert job["screen"]["events"][0]["zh"]
+
+
+def test_voiceprints_separate_speakers_with_the_same_pitch(monkeypatch):
+    import numpy as np
+
+    from app import speakers, voices
+
+    sr = 16000
+    audio = np.zeros(9 * sr, dtype=np.float32)
+    t = np.arange(2 * sr) / sr
+    for start, amp in ((0, 0.2), (3, 0.4), (6, 0.2)):  # same 120 Hz pitch, two "people"
+        audio[start * sr: start * sr + len(t)] = amp * np.sin(2 * np.pi * 120 * t)
+    # stand-in voiceprints: person A speaks softly, person B loudly
+    monkeypatch.setattr(speakers, "available", lambda: True)
+    monkeypatch.setattr(speakers, "embed", lambda x: np.array([1.0, 0, 0]) if np.abs(x).max() < 0.3 else np.array([0, 1.0, 0]))
+    segs = [Segment(1, 0, 2, "你好啊"), Segment(2, 3, 5, "我很好"), Segment(3, 6, 8, "那就好"), Segment(4, 8.1, 8.5, "嗯")]
+    found = voices.analyze_speakers(audio, segs)
+    assert found["method"] == "voiceprint"
+    assert found["labels"][1] == found["labels"][3] != found["labels"][2]
+    assert found["labels"][4] == found["labels"][3]  # too short for a voiceprint: the closest line's speaker
+    chosen = voices.auto_voices(found["speakers"], "zh")
+    a, b = (chosen[found["labels"][i]] for i in (1, 2))
+    assert a["voice"] != b["voice"]  # two men, two different voices
+    assert voices.describe(found["speakers"], chosen)[0]["speaker"].startswith("说话人 1（男声")
+
+
+def test_voiceprint_clustering():
+    import numpy as np
+
+    from app.speakers import cluster
+
+    rng = np.random.default_rng(1)
+    centers = [rng.standard_normal(192) for _ in range(3)]
+    vectors = {}
+    for i in range(12):
+        v = centers[i % 3] + 0.3 * rng.standard_normal(192)
+        vectors[i] = v / np.linalg.norm(v)
+    groups = cluster(vectors)
+    assert sorted(sorted(g) for g in groups) == [[0, 3, 6, 9], [1, 4, 7, 10], [2, 5, 8, 11]]
+    assert len(cluster(vectors, max_speakers=2)) == 2
+
+
+def test_fbank_matches_kaldi():
+    import numpy as np
+    import pytest
+
+    knf = pytest.importorskip("kaldi_native_fbank")
+    from app.speakers import fbank
+
+    rng = np.random.default_rng(0)
+    x = (0.1 * rng.standard_normal(16000) + 0.3 * np.sin(2 * np.pi * 220 * np.arange(16000) / 16000)).astype(np.float32)
+    opts = knf.FbankOptions()
+    opts.frame_opts.dither = 0
+    opts.mel_opts.num_bins = 80
+    ref = knf.OnlineFbank(opts)
+    ref.accept_waveform(16000, x.tolist())
+    ref.input_finished()
+    expected = np.array([ref.get_frame(i) for i in range(ref.num_frames_ready)])
+    assert np.abs(fbank(x) - expected).max() < 1e-2
+
+
+def test_line_voices_follow_pitch_and_speed():
+    from app import voices
+
+    assert voices.syllables("你好，世界") == 4 and voices.syllables("Hello there, friend") == 5
+    found = {"speakers": [{"id": 0, "f0": 120.0, "gender": "male", "lines": 3, "speed": 6.3}],
+             "labels": {1: 0, 2: 0, 3: 0}, "pitch": {1: 120.0, 2: 150.0, 3: None}}
+    chosen = voices.auto_voices(found["speakers"], "zh")
+    assert chosen[0]["rate"] == 25  # a fast talker gets a faster voice (capped)
+    lines = voices.line_voices(found, chosen)
+    shift = chosen[0]["shift"]
+    assert lines[1]["pitch"] == f"{shift:+d}Hz" and lines[3]["pitch"] == f"{shift:+d}Hz"
+    assert int(lines[2]["pitch"][:-2]) > shift + 10  # said higher than usual: dubbed higher
+    assert {v["rate"] for v in lines.values()} == {25}
+
+
+def test_dub_clones_the_speakers_voices(monkeypatch, tmp_path):
+    import wave
+
+    import numpy as np
+
+    from app import clone
+
+    calls = []
+    dub = _fake_tts(monkeypatch, calls)
+    path = tmp_path / "talk.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(_voices_audio(), -1, 1) * 32767).astype("<i2").tobytes())
+    uploads, spoken, deleted = [], [], []
+
+    def upload(key, wav, text, name):
+        uploads.append((key, text, name, len(wav)))
+        return f"speech:{name}"
+
+    def speak(key, uri, text, out, speed=1.0):
+        spoken.append((uri, text, speed))
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x10\x00" * int(len(text) * 0.2 * 24000))
+
+    monkeypatch.setattr(clone, "upload", upload)
+    monkeypatch.setattr(clone, "speak", speak)
+    monkeypatch.setattr(clone, "delete", lambda key, uri: deleted.append(uri))
+    segs = [Segment(1, 0, 2, "low one", zh="你好"), Segment(2, 3, 5, "high", zh="早上好"), Segment(3, 6, 8, "low two", zh="再见")]
+    out, speakers = dub.dub(str(path), tmp_path / "x_dubbed", segs, "zh", bg_volume=0, clone_key="sk-sf")
+    assert not calls  # no edge-tts voice was used
+    assert sorted(t for _, t, _, _ in uploads) == ["high", "low one low two"]  # each speaker's own lines as reference
+    by_text = {t: uri for uri, t, _ in spoken}
+    assert by_text["你好"] == by_text["再见"] != by_text["早上好"]
+    assert sorted(deleted) == sorted(f"speech:{n}" for _, _, n, _ in uploads)  # cleaned up
+    assert all(s["voice"].startswith("克隆原声") for s in speakers)
+
+
+def test_clone_errors_reach_the_page(monkeypatch, tmp_path):
+    import pytest
+
+    from app import clone
+
+    dub = _fake_tts(monkeypatch)
+
+    def upload(*a):
+        raise clone.CloneError("硅基流动 API Key 无效，请检查后重试")
+
+    monkeypatch.setattr(clone, "upload", upload)
+    src = _make_media(tmp_path, ["-f", "lavfi", "-i", "sine=frequency=150:duration=3", "-c:a", "aac"], "a.m4a")
+    with pytest.raises(dub.DubError, match="Key 无效"):
+        dub.dub(src, tmp_path / "y", [Segment(1, 0, 2.5, "hi", zh="你好")], "zh", clone_key="bad")
+
+
+def test_unexpected_errors_show_their_reason(monkeypatch, tmp_path):
+    blocker = tmp_path / "uploads"
+    blocker.write_text("a file where the upload folder should be")
+    monkeypatch.setattr(main, "UPLOAD_DIR", blocker)
+    monkeypatch.setattr(main, "ERROR_LOG", tmp_path / "error.log")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    r = client.post("/api/jobs", files={"file": ("a.mp3", b"x")}, data={"target": "zh"})
+    assert r.status_code == 500
+    assert "读写文件失败" in r.json()["detail"]
+    assert "Traceback" in (tmp_path / "error.log").read_text(encoding="utf-8")

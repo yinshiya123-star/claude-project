@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 import zipfile
 import threading
@@ -15,7 +16,7 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,7 +25,7 @@ load_dotenv()
 from . import transcriber, translator  # noqa: E402  (env must be loaded first)
 from .burn import burn  # noqa: E402
 from .dub import VOICES, dub  # noqa: E402
-from . import image_translate, screen_text  # noqa: E402
+from . import clone, image_translate, screen_text  # noqa: E402
 from .export import export_mp3  # noqa: E402
 from .media import log_ffmpeg_errors, video_fps  # noqa: E402
 from .timing import netflix_timing  # noqa: E402
@@ -40,6 +41,33 @@ ALLOWED_EXT = {".mp3", ".mp4", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".webm",
 
 app = FastAPI(title="DeepSeek 字幕工坊")
 log_ffmpeg_errors()
+ERROR_LOG = UPLOAD_DIR.parent / "error.log"
+logger = logging.getLogger("subtitle")
+
+
+def _log_error(where: str, exc: BaseException) -> None:
+    """Print the traceback in the console window and keep it in data/error.log."""
+    logger.error("%s 出错", where, exc_info=exc)
+    try:
+        import traceback
+
+        ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with ERROR_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {where}\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except OSError:
+        pass
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception):
+    """A bare "500" tells nobody anything: show the reason on the page."""
+    _log_error(f"{request.method} {request.url.path}", exc)
+    if isinstance(exc, OSError):
+        reason = f"读写文件失败（{exc.strerror or exc}），请检查磁盘空间和程序文件夹的写入权限"
+    else:
+        reason = f"{type(exc).__name__}: {exc}"
+    return JSONResponse({"detail": f"服务器出错：{reason}（详细信息见黑色窗口或 data/error.log）"}, status_code=500)
 
 
 @app.middleware("http")
@@ -193,6 +221,7 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
     except JobCancelled:
         _update(job_id, status="cancelled", stage="已取消")
     except Exception as e:
+        _log_error('后台任务', e)
         _update(job_id, status="error", stage="出错", error=str(e))
 
 
@@ -221,6 +250,7 @@ async def create_job(
         raise HTTPException(400, f"不支持的文件格式 {ext or '(无扩展名)'}，支持: {', '.join(sorted(ALLOWED_EXT))}")
 
     job_id = uuid.uuid4().hex[:12]
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)  # the data folder may have been deleted meanwhile
     dest = UPLOAD_DIR / f"{job_id}{ext}"
     size = 0
     with dest.open("wb") as out:
@@ -358,6 +388,7 @@ def _run_burn(job_id: str, media_path: str, segments: list[Segment], mode: str, 
         tmp.replace(dst)
         _update(job_id, burn={"status": "done", "mode": mode, "progress": 1.0, "error": None})
     except Exception as e:
+        _log_error('后台任务', e)
         _update(job_id, burn={"status": "error", "mode": mode, "progress": 0.0, "error": str(e)})
 
 
@@ -426,6 +457,7 @@ def _run_screen(job_id: str, media_path: str, req: ScreenRequest) -> None:
             )
         update(status="done", stage=f"完成，识别到 {len(events)} 段画面文字", progress=1.0, events=events)
     except Exception as e:
+        _log_error('后台任务', e)
         update(status="error", stage="出错", error=str(e))
 
 
@@ -557,6 +589,7 @@ class DubRequest(BaseModel):
     voice: str = ""
     bg_volume: float = 0.2
     burn_mode: str | None = None
+    clone_key: str = ""  # SiliconFlow key: clone the speakers' own voices
 
 
 def _run_dub(job_id: str, media_path: str, segments: list[Segment], req: DubRequest) -> None:
@@ -567,9 +600,11 @@ def _run_dub(job_id: str, media_path: str, segments: list[Segment], req: DubRequ
 
     try:
         out, speakers = dub(media_path, EXPORT_DIR / f"{job_id}_dubbed", segments, req.lang, req.voice or None,
-                            req.bg_volume, req.burn_mode, on_progress=progress)
+                            req.bg_volume, req.burn_mode, on_progress=progress,
+                            clone_key=clone.api_key(req.clone_key))
         _update(job_id, dub={**state, "status": "done", "progress": 1.0, "file": out.name, "speakers": speakers})
     except Exception as e:
+        _log_error('后台任务', e)
         _update(job_id, dub={**state, "status": "error", "error": str(e)})
 
 
@@ -595,7 +630,8 @@ def start_dub(job_id: str, req: DubRequest):
     with jobs_lock:
         if (jobs[job_id].get("dub") or {}).get("status") == "running":
             raise HTTPException(409, "正在配音中，请等待完成")
-        jobs[job_id]["dub"] = {"status": "running", "lang": req.lang, "progress": 0.0, "error": None, "file": None}
+        jobs[job_id]["dub"] = {"status": "running", "lang": req.lang, "progress": 0.0, "error": None, "file": None,
+                               "clone": bool(clone.api_key(req.clone_key))}
     burn_executor.submit(_run_dub, job_id, job["media_path"], segments, req)
     return {"ok": True}
 
@@ -675,6 +711,7 @@ def _run_image(image_id: str, path: str, target: str, ocr_lang: str, api_key: st
         _update_image(image_id, status="done", stage="完成", progress=1.0, lines=lines,
                       language=info["language"], theme=info["theme"], terms=info["terms"])
     except Exception as e:
+        _log_error('后台任务', e)
         _update_image(image_id, status="error", stage="出错", error=str(e))
 
 
@@ -700,6 +737,7 @@ async def create_image_job(
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "图片太大")
     image_id = uuid.uuid4().hex[:12]
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = UPLOAD_DIR / f"img_{image_id}{ext}"
     dest.write_bytes(data)
     with jobs_lock:
@@ -757,6 +795,7 @@ def get_image_text(image_id: str):
 def config():
     return {
         "server_key_configured": bool(os.getenv("DEEPSEEK_API_KEY")),
+        "clone_key_configured": bool(os.getenv("SILICONFLOW_API_KEY")),
         "whisper_model": os.getenv("WHISPER_MODEL", "small"),
         "deepseek_model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         "allowed_ext": sorted(ALLOWED_EXT),

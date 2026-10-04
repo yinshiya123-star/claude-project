@@ -283,6 +283,7 @@ video::cue { font-size: 18px; line-height: 1.4; background: rgba(0, 0, 0, .65); 
 .download-btn.ghost { background: var(--bg-2); color: var(--text); border: 0; }
 .theme { font-size: 15px; margin: 0 0 12px; }
 .dub-speakers { margin-top: 14px; }
+.clone-field { margin: 0 0 16px; }
 .terms-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .terms-table td { padding: 7px 8px; border-top: 1px solid var(--border); vertical-align: top; }
 .terms-table td:first-child { font-weight: 600; }
