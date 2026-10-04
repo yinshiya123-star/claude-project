@@ -8,3 +8,10 @@ def no_voiceprint_download(monkeypatch):
     from app import speakers
 
     monkeypatch.setattr(speakers, "available", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def error_log_in_tmp(monkeypatch, tmp_path):
+    from app import main
+
+    monkeypatch.setattr(main, "ERROR_LOG", tmp_path / "error.log")

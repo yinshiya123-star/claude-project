@@ -589,7 +589,7 @@ class DubRequest(BaseModel):
     voice: str = ""
     bg_volume: float = 0.0  # original sound kept while someone speaks
     burn_mode: str | None = None
-    clone_key: str = ""  # SiliconFlow key: clone the speakers' own voices
+    engine: str = "clone"  # clone: the speakers' own voices (ZipVoice, offline); edge: matched edge-tts voices
 
 
 def _run_dub(job_id: str, media_path: str, segments: list[Segment], req: DubRequest) -> None:
@@ -601,7 +601,7 @@ def _run_dub(job_id: str, media_path: str, segments: list[Segment], req: DubRequ
     try:
         out, speakers = dub(media_path, EXPORT_DIR / f"{job_id}_dubbed", segments, req.lang, req.voice or None,
                             req.bg_volume, req.burn_mode, on_progress=progress,
-                            clone_key=clone.api_key(req.clone_key))
+                            clone=req.engine == "clone")
         _update(job_id, dub={**state, "status": "done", "progress": 1.0, "file": out.name, "speakers": speakers})
     except Exception as e:
         _log_error('后台任务', e)
@@ -621,6 +621,8 @@ def start_dub(job_id: str, req: DubRequest):
     # No voice: matched to the speakers in the video automatically (the page always does this).
     if req.voice and req.voice not in {v for v, _ in VOICES[req.lang]}:
         raise HTTPException(400, "不支持的配音音色")
+    if req.engine not in ("clone", "edge"):
+        raise HTTPException(400, "配音方式只支持 clone / edge")
     if req.burn_mode is not None:
         _check_mode(req.burn_mode)
     req.bg_volume = min(1.0, max(0.0, req.bg_volume))
@@ -631,7 +633,7 @@ def start_dub(job_id: str, req: DubRequest):
         if (jobs[job_id].get("dub") or {}).get("status") == "running":
             raise HTTPException(409, "正在配音中，请等待完成")
         jobs[job_id]["dub"] = {"status": "running", "lang": req.lang, "progress": 0.0, "error": None, "file": None,
-                               "clone": bool(clone.api_key(req.clone_key))}
+                               "clone": req.engine == "clone"}
     burn_executor.submit(_run_dub, job_id, job["media_path"], segments, req)
     return {"ok": True}
 
@@ -795,7 +797,7 @@ def get_image_text(image_id: str):
 def config():
     return {
         "server_key_configured": bool(os.getenv("DEEPSEEK_API_KEY")),
-        "clone_key_configured": bool(os.getenv("SILICONFLOW_API_KEY")),
+        "clone_model_ready": clone.downloaded(),
         "whisper_model": os.getenv("WHISPER_MODEL", "small"),
         "deepseek_model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         "allowed_ext": sorted(ALLOWED_EXT),

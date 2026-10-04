@@ -9,7 +9,9 @@ time slot, place the clips on a timeline and merge them with the video.
   in the video automatically (voices.py): speakers are told apart by
   voiceprint, each gets the closest voice shifted to their pitch and speed,
   and every line follows the original line's pitch and loudness.
-- With a SiliconFlow key the speakers' own voices are cloned instead (clone.py).
+- By default the speakers' own voices are cloned instead, free and offline,
+  with the open-source ZipVoice model (clone.py); edge-tts voices are the
+  faster alternative.
 - A clip longer than its slot is synthesised again with a faster speaking rate
   (up to +60 %); whatever still doesn't fit is cut with a short fade-out.
 - Lines of one speaker that follow each other closely are spoken in one go
@@ -90,11 +92,11 @@ def _speak(text: str, voice: dict, path: str, rate: int) -> None:
         from . import clone as cloning
 
         try:
-            cloning.speak(clone["key"], clone["uri"], text, path, 1 + rate / 100)
+            cloning.speak(clone, text, path, 1 + rate / 100)
         except cloning.CloneError as e:
             raise DubError(str(e)) from e
         except Exception as e:
-            raise DubError(f"声音克隆合成失败（需要能访问硅基流动）：{e}") from e
+            raise DubError(f"声音克隆合成失败：{e}") from e
     else:
         synthesize(text, voice["voice"], path, rate, voice["pitch"])
 
@@ -132,8 +134,7 @@ def _clip_for(seg: Segment, text: str, voice: dict, slot: float, tmp: str, gain:
 
 
 def _same_voice(a: dict, b: dict) -> bool:
-    return (a.get("voice"), a.get("speaker"), (a.get("clone") or {}).get("uri")) == \
-        (b.get("voice"), b.get("speaker"), (b.get("clone") or {}).get("uri"))
+    return (a.get("voice"), a.get("speaker"), id(a.get("clone"))) == (b.get("voice"), b.get("speaker"), id(b.get("clone")))
 
 
 def _join(texts: list[str], lang: str) -> str:
@@ -280,11 +281,11 @@ def _remux(src: str, audio_path: str, dst: str) -> None:
         feeder.track.add(None)
 
 
-def match_voices(src: str, segments: list[Segment], lang: str, clone_key: str | None = None,
-                 cloned: list | None = None) -> tuple[dict[int, dict], dict[int, float], list[dict]]:
+def match_voices(src: str, segments: list[Segment], lang: str,
+                 clone: bool = False) -> tuple[dict[int, dict], dict[int, float], list[dict]]:
     """Voice settings per line from the speakers in the original audio, loudness gain
-    per line, and a summary of who got which voice. With `clone_key` every speaker's
-    own voice is cloned; the created voices are appended to `cloned` as (key, uri)."""
+    per line, and a summary of who got which voice. With `clone` every speaker's own
+    voice is cloned from the video; otherwise the closest edge-tts voice is used."""
     from . import voices
     from .transcriber import decode_audio
 
@@ -293,8 +294,8 @@ def match_voices(src: str, segments: list[Segment], lang: str, clone_key: str | 
     except RuntimeError:  # no sound track: one default voice
         audio = None
     if audio is None or not len(audio):
-        if clone_key:
-            raise DubError("原视频没有声音，无法克隆说话人的声音")
+        if clone:
+            raise DubError("原视频没有声音，无法克隆说话人的声音；请把配音方式改成「微软神经语音」")
         found = {"speakers": [{"id": 0, "f0": None, "gender": "female", "lines": len(segments), "speed": None}],
                  "labels": {s.id: 0 for s in segments}, "loudness": {}, "pitch": {}, "speed": {}}
     else:
@@ -306,35 +307,27 @@ def match_voices(src: str, segments: list[Segment], lang: str, clone_key: str | 
     median = levels[len(levels) // 2] if levels else 0
     gains = {sid: min(1.6, max(0.6, v / median)) for sid, v in loud.items() if median and v > 1e-4}
     summary = voices.describe(found["speakers"], chosen)
-    if clone_key:
-        from . import clone
+    if clone:
+        from . import clone as cloning
 
         for n, spk in enumerate(found["speakers"]):
             ids = [sid for sid, label in found["labels"].items() if label == spk["id"]]
-            ref = clone.reference(audio, segments, ids, loud)
+            ref = cloning.reference(audio, segments, ids, loud)
             if ref is None:
                 continue  # nothing to clone from: keep the matched edge voice
-            try:
-                uri = clone.upload(clone_key, ref[0], ref[1], f"dub-speaker-{n + 1}")
-            except clone.CloneError as e:
-                raise DubError(str(e)) from e
-            except Exception as e:
-                raise DubError(f"上传参考音频失败（需要能访问硅基流动）：{e}") from e
-            if cloned is not None:
-                cloned.append((clone_key, uri))
-            for sid in ids:
-                per_line[sid] = {**per_line[sid], "clone": {"key": clone_key, "uri": uri}}
-            summary[n]["voice"] = f"克隆原声（参考 {len(ref[1])} 字）"
+            for sid in ids:  # the cloned voice carries the speaker's own pitch and pace
+                per_line[sid] = {**per_line[sid], "clone": ref, "rate": 0}
+            summary[n]["voice"] = f"克隆原声（参考 {len(ref['samples']) / cloning.SR:.0f} 秒原声）"
     return per_line, gains, summary
 
 
 def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str | None = None,
         bg_volume: float = 0.0, burn_mode: str | None = None,
-        on_progress: Callable[[float], None] | None = None, clone_key: str | None = None) -> tuple[Path, list[dict]]:
+        on_progress: Callable[[float], None] | None = None, clone: bool = False) -> tuple[Path, list[dict]]:
     """Dub `src`; returns (output file, speaker summary). The output is MP4 for videos or
     burned output, MP3 otherwise. Voices are matched to the speakers automatically unless
-    `voice` forces one voice for every line; with `clone_key` (SiliconFlow) the speakers'
-    own voices are cloned.
+    `voice` forces one voice for every line; with `clone` the speakers' own voices are
+    cloned (ZipVoice, offline).
 
     `dst_stem` has no extension (e.g. exports/<job>_dubbed); it is added here.
     """
@@ -352,20 +345,20 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
         raise DubError("没有可配音的字幕文本")
 
     step = (lambda a, b: (lambda p: on_progress(a + (b - a) * p))) if on_progress else (lambda a, b: None)
-    cloned: list = []
-    try:
-        if voice:
-            per_line, gains = {s.id: {"voice": voice, "pitch": "+0Hz", "rate": 0} for s in segments}, {}
-            summary = [{"speaker": "全部台词", "voice": voice}]
-        else:
-            per_line, gains, summary = match_voices(src, segments, lang, clone_key, cloned)
-        spans: list = []
-        speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains, spans)
-    finally:
-        from . import clone
+    if voice:
+        per_line, gains = {s.id: {"voice": voice, "pitch": "+0Hz", "rate": 0} for s in segments}, {}
+        summary = [{"speaker": "全部台词", "voice": voice}]
+    else:
+        if clone:
+            from . import clone as cloning
 
-        for key, uri in cloned:
-            clone.delete(key, uri)
+            try:
+                cloning.prepare()  # first time: download the model (about 160 MB)
+            except cloning.CloneError as e:
+                raise DubError(f"{e}。也可以把配音方式改成「微软神经语音」") from e
+        per_line, gains, summary = match_voices(src, segments, lang, clone)
+    spans: list = []
+    speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains, spans)
     if has_audio:
         talking = [(s.start - DUCK_PAD[0], s.end + DUCK_PAD[1]) for s in segments] + spans
         original = duck(_load(src), talking, float(bg_volume))

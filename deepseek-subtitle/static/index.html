@@ -223,7 +223,7 @@
           </div>
 
           <div class="tab-body" id="tab-dub" hidden>
-            <p class="hint">按视频里的原声自动配音：用声纹区分每个说话人（音调相近的两个人也能分开），为每个人匹配最接近的神经语音并调到他的音高和语速；每句话再跟随原句的语调起伏和音量；同一个人连着说的几句会一口气合成，不会在半句话中间停顿；按时间轴对齐，太长的句子自动加快语速；有人说话时原声自动静音，不说话时恢复。需要能访问微软语音服务（首次使用会自动下载约 28 MB 的声纹模型）。</p>
+            <p class="hint">按视频里的原声自动配音：用声纹区分每个说话人（音调相近的两个人也能分开），默认克隆每个人自己的声音；也可以改用匹配的微软神经语音（调到他的音高和语速，每句跟随原句的语调起伏）；音量跟随原句；同一个人连着说的几句会一口气合成，不会在半句话中间停顿；按时间轴对齐，太长的句子自动加快语速；有人说话时原声自动静音，不说话时恢复。首次使用会自动下载约 28 MB 的声纹模型。</p>
             <div class="dub-grid">
               <label class="field"><span>配音语言</span><select id="dub-lang"></select></label>
 
@@ -233,9 +233,12 @@
               <label class="field"><span>同时烧录字幕</span>
                 <select id="dub-burn"><option value="">不烧录</option></select></label>
             </div>
-            <label class="field clone-field"><span>声音克隆（可选，最像原声）：硅基流动 API Key</span>
-              <input id="clone-key" type="password" autocomplete="off" placeholder="留空 = 用上面的自动匹配音色" />
-              <small class="hint">填写后会从视频里截取每个说话人约 10 秒的原声，用 CosyVoice2 克隆出他本人的声音来说译文（跨语言也可以）。按字数收费，Key 只保存在你的浏览器里，在 <a href="https://cloud.siliconflow.cn/account/ak" target="_blank" rel="noopener">硅基流动</a> 创建。</small></label>
+            <label class="field clone-field"><span>配音方式</span>
+              <select id="dub-engine">
+                <option value="clone">克隆原声（最像原声：每个人用他自己的声音说译文）</option>
+                <option value="edge">匹配微软神经语音（更快，需要联网）</option>
+              </select>
+              <small class="hint" id="engine-hint">克隆原声用 GitHub 上的开源模型 ZipVoice（免费、在本机运行，不上传）：从视频里截取每个说话人约 8 秒的原声来克隆，跨语言也可以。第一次使用会自动下载约 160 MB 模型；CPU 上大约每 1 秒配音要算 1 秒。</small></label>
             <button id="dub-btn" class="primary">开始配音</button>
             <div id="dub-progress" class="mini-progress" hidden>
               <div class="progress-head"><span id="dub-stage">配音中</span><span id="dub-percent">0%</span></div>

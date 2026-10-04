@@ -634,8 +634,8 @@ def test_dub_api(monkeypatch, tmp_path):
     monkeypatch.setattr(main.translator, "translate", lambda segments, **kw: {"theme": "", "terms": []})
     seen = {}
 
-    def fake_dub(src, stem, segments, lang, voice, bg_volume, burn_mode, on_progress=None, clone_key=None):
-        seen.update(lang=lang, voice=voice, bg=bg_volume, burn=burn_mode, clone=clone_key)
+    def fake_dub(src, stem, segments, lang, voice, bg_volume, burn_mode, on_progress=None, clone=False):
+        seen.update(lang=lang, voice=voice, bg=bg_volume, burn=burn_mode, clone=clone)
         out = Path(str(stem) + ".mp4")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"dubbed")
@@ -651,6 +651,7 @@ def test_dub_api(monkeypatch, tmp_path):
         time.sleep(0.05)
     assert client.post(f"/api/jobs/{job_id}/dub", json={"lang": "fr"}).status_code == 400
     assert client.post(f"/api/jobs/{job_id}/dub", json={"lang": "zh", "voice": "nope"}).status_code == 400
+    assert client.post(f"/api/jobs/{job_id}/dub", json={"lang": "zh", "engine": "nope"}).status_code == 400
     r = client.post(f"/api/jobs/{job_id}/dub", json={"lang": "en", "bg_volume": 5, "burn_mode": "en"})
     assert r.status_code == 200
     for _ in range(50):
@@ -658,7 +659,7 @@ def test_dub_api(monkeypatch, tmp_path):
         if job["dub"]["status"] == "done":
             break
         time.sleep(0.05)
-    assert seen == {"lang": "en", "voice": None, "bg": 1.0, "burn": "en", "clone": None}  # no voice: matched automatically
+    assert seen == {"lang": "en", "voice": None, "bg": 1.0, "burn": "en", "clone": True}  # cloned by default
     assert job["dub"]["speakers"][0]["voice"] == "云健"
     r = client.get(f"/api/jobs/{job_id}/dubbed")
     assert r.content == b"dubbed" and "a.en.dubbed.mp4" in r.headers["content-disposition"]
@@ -1198,47 +1199,56 @@ def test_dub_clones_the_speakers_voices(monkeypatch, tmp_path):
         w.setsampwidth(2)
         w.setframerate(16000)
         w.writeframes((np.clip(_voices_audio(), -1, 1) * 32767).astype("<i2").tobytes())
-    uploads, spoken, deleted = [], [], []
+    spoken = []
 
-    def upload(key, wav, text, name):
-        uploads.append((key, text, name, len(wav)))
-        return f"speech:{name}"
-
-    def speak(key, uri, text, out, speed=1.0):
-        spoken.append((uri, text, speed))
+    def speak(ref, text, out, speed=1.0):
+        spoken.append((ref["text"], len(ref["samples"]), text))
         with wave.open(out, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(24000)
             w.writeframes(b"\x10\x00" * int(len(text) * 0.2 * 24000))
 
-    monkeypatch.setattr(clone, "upload", upload)
+    monkeypatch.setattr(clone, "prepare", lambda: None)
     monkeypatch.setattr(clone, "speak", speak)
-    monkeypatch.setattr(clone, "delete", lambda key, uri: deleted.append(uri))
     segs = [Segment(1, 0, 2, "low one", zh="你好"), Segment(2, 3, 5, "high", zh="早上好"), Segment(3, 6, 8, "low two", zh="再见")]
-    out, speakers = dub.dub(str(path), tmp_path / "x_dubbed", segs, "zh", bg_volume=0, clone_key="sk-sf")
+    out, speakers = dub.dub(str(path), tmp_path / "x_dubbed", segs, "zh", bg_volume=0, clone=True)
     assert not calls  # no edge-tts voice was used
-    assert sorted(t for _, t, _, _ in uploads) == ["high", "low one low two"]  # each speaker's own lines as reference
-    by_text = {t: uri for uri, t, _ in spoken}
-    assert by_text["你好"] == by_text["再见"] != by_text["早上好"]
-    assert sorted(deleted) == sorted(f"speech:{n}" for _, _, n, _ in uploads)  # cleaned up
+    refs = {text: ref for ref, _, text in spoken}
+    assert refs["你好"] == refs["再见"] == "low one low two"  # each speaker's own lines (and transcript) as reference
+    assert refs["早上好"] == "high"
+    assert all(n == 16000 * 4 + int(clone.GAP * 16000) or n == 16000 * 2 for _, n, t in spoken)
     assert all(s["voice"].startswith("克隆原声") for s in speakers)
 
 
-def test_clone_errors_reach_the_page(monkeypatch, tmp_path):
+def test_clone_reference_picks_clear_lines():
+    import numpy as np
+
+    from app import clone
+
+    audio = np.zeros(40 * 16000, dtype=np.float32)
+    segs = [Segment(i, i * 4.0, i * 4.0 + 3.0, f"line{i}") for i in range(8)] + [Segment(9, 33, 33.5, "嗯")]
+    loud = {i: 0.1 * (i + 1) for i in range(8)}
+    ref = clone.reference(audio, segs, [s.id for s in segs], loud)
+    assert ref["text"] == "line5 line6 line7"  # the loudest lines, in order, about 8 s
+    assert abs(len(ref["samples"]) / 16000 - (9 + 2 * clone.GAP)) < 0.01
+    assert clone.reference(audio, segs, [], loud) is None
+
+
+def test_clone_download_failure_reaches_the_page(monkeypatch, tmp_path):
     import pytest
 
     from app import clone
 
     dub = _fake_tts(monkeypatch)
 
-    def upload(*a):
-        raise clone.CloneError("硅基流动 API Key 无效，请检查后重试")
+    def prepare():
+        raise clone.CloneError("下载声音克隆模型失败：github: timed out")
 
-    monkeypatch.setattr(clone, "upload", upload)
+    monkeypatch.setattr(clone, "prepare", prepare)
     src = _make_media(tmp_path, ["-f", "lavfi", "-i", "sine=frequency=150:duration=3", "-c:a", "aac"], "a.m4a")
-    with pytest.raises(dub.DubError, match="Key 无效"):
-        dub.dub(src, tmp_path / "y", [Segment(1, 0, 2.5, "hi", zh="你好")], "zh", clone_key="bad")
+    with pytest.raises(dub.DubError, match="下载声音克隆模型失败.*微软神经语音"):
+        dub.dub(src, tmp_path / "y", [Segment(1, 0, 2.5, "hi", zh="你好")], "zh", clone=True)
 
 
 def test_unexpected_errors_show_their_reason(monkeypatch, tmp_path):

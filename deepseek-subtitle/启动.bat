@@ -20,7 +20,7 @@ if errorlevel 1 (
 for /f "delims=" %%v in ('python --version 2^>^&1') do echo 已找到 %%v
 
 rem ---- 2. 检查并安装依赖（只在第一次运行时安装）----
-python -c "import fastapi, uvicorn, multipart, openai, faster_whisper, dotenv, mutagen, PIL, edge_tts, rapidocr" >nul 2>&1
+python -c "import fastapi, uvicorn, multipart, openai, faster_whisper, dotenv, mutagen, PIL, edge_tts, rapidocr, sherpa_onnx" >nul 2>&1
 if not errorlevel 1 goto :run
 
 echo.
