@@ -189,9 +189,12 @@ def burn(
     mode: str,
     on_progress: Callable[[float], None] | None = None,
     audio_source: str | None = None,
+    screen: dict | None = None,
 ) -> None:
     """Burn `segments` into `src`. `audio_source` replaces the original sound
-    (used for dubbing); an empty `segments` list re-encodes without subtitles."""
+    (used for dubbing); an empty `segments` list re-encodes without subtitles.
+    `screen` = {"events", "mode", "size"} also translates the text in the picture
+    (see screen_text.py)."""
     import av
     import numpy as np
 
@@ -218,6 +221,11 @@ def burn(
             vout.pix_fmt = "yuv420p"
             vout.width, vout.height = width - width % 2, height - height % 2  # yuv420p needs even sizes
             renderer = SubtitleRenderer(vout.width, vout.height)
+            overlay = None
+            if screen and screen.get("events") and vin is not None:
+                from .screen_text import ScreenOverlay
+
+                overlay = ScreenOverlay(screen["events"], screen["mode"], screen.get("size"), vout.width, vout.height)
             last_pts = -1
 
             audio = AudioTrack(out, "aac", 48000, 192000) if (ain is not None or audio_source) else None
@@ -230,8 +238,11 @@ def burn(
                 if rgb.shape[0] != vout.height or rgb.shape[1] != vout.width:
                     rgb = _fit(rgb, vout.width, vout.height)
                 seg = tracker.at(t)
-                if seg is not None:
+                if overlay is not None or seg is not None:
                     rgb = rgb.copy() if not rgb.flags.writeable else rgb
+                if overlay is not None:
+                    overlay.draw(rgb, t)  # text in the picture first, dialogue subtitles on top
+                if seg is not None:
                     renderer.draw(rgb, seg, mode)
                 frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format="rgb24")
                 pts = max(round(t * fps), last_pts + 1)  # keep timestamps strictly increasing

@@ -27,6 +27,18 @@ ZH_INITIAL_PROMPT = "以下是普通话的句子，使用简体中文，并带�
 
 # Choices offered on the web page: speed versus accuracy.
 MODELS = ("small", "medium", "large-v3-turbo")
+MODEL_SIZES = {"small": "460 MB", "medium": "1.5 GB", "large-v3-turbo": "1.6 GB"}
+
+
+def model_cached(name: str | None = None) -> bool:
+    """Whether the model is already downloaded (else the first job downloads it)."""
+    try:
+        from faster_whisper.utils import download_model
+
+        download_model(name or os.getenv("WHISPER_MODEL", "small"), local_files_only=True)
+        return True
+    except Exception:
+        return False
 
 
 def _get_model(device: str, name: str | None = None):

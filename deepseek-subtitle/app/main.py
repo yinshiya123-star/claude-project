@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
+import zipfile
 import threading
 import time
 import uuid
@@ -11,8 +14,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -21,7 +24,7 @@ load_dotenv()
 from . import transcriber, translator  # noqa: E402  (env must be loaded first)
 from .burn import burn  # noqa: E402
 from .dub import VOICES, dub  # noqa: E402
-from . import image_translate  # noqa: E402
+from . import image_translate, screen_text  # noqa: E402
 from .export import export_mp3  # noqa: E402
 from .media import log_ffmpeg_errors, video_fps  # noqa: E402
 from .timing import netflix_timing  # noqa: E402
@@ -35,8 +38,36 @@ EXPORT_DIR = UPLOAD_DIR.parent / "exports"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 ALLOWED_EXT = {".mp3", ".mp4", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".webm", ".mov", ".mkv"}
 
-app = FastAPI(title="DeepSeek 中英字幕生成器")
+app = FastAPI(title="DeepSeek 字幕工坊")
 log_ffmpeg_errors()
+
+
+@app.middleware("http")
+async def no_stale_pages(request: Request, call_next):
+    """Make browsers revalidate the page files: after an update, a cached old
+    app.js / style.css next to the new index.html breaks the layout and buttons."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+def _asset_version() -> str:
+    digest = hashlib.sha1()
+    for name in ("app.js", "style.css"):
+        digest.update((STATIC_DIR / name).read_bytes())
+    return digest.hexdigest()[:10]
+
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/index.html", response_class=HTMLResponse)
+def index():
+    """The page, with style.css / app.js URLs that change whenever their content does."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    version = _asset_version()
+    html = html.replace('href="style.css"', f'href="style.css?v={version}"')
+    html = html.replace('src="app.js"', f'src="app.js?v={version}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 # Whisper is CPU/GPU heavy: process one job at a time.
 executor = ThreadPoolExecutor(max_workers=1)
@@ -49,9 +80,35 @@ MODES = ("bilingual", "zh", "en", "orig")
 SUBTITLE_TYPES = {"srt": "application/x-subrip", "vtt": "text/vtt", "lrc": "text/plain"}
 
 
+class JobCancelled(BaseException):
+    """BaseException so no `except Exception` on the way (e.g. the GPU fallback) swallows it."""
+
+
+ACTIVE = ("queued", "transcribing", "translating")
+job_order: list[str] = []  # submission order, for "N jobs ahead of you"
+
+
 def _update(job_id: str, **fields) -> None:
     with jobs_lock:
-        jobs[job_id].update(fields)
+        job = jobs[job_id]
+        # Progress updates are where a running job notices it was cancelled.
+        if job.get("cancel") and job.get("status") in ACTIVE and set(fields) <= {"progress", "stage"}:
+            raise JobCancelled()
+        job.update(fields)
+
+
+def _with_queue_info(job: dict) -> dict:
+    """Tell a waiting job how many are in front of it, and what the first one is doing."""
+    if job.get("status") == "queued":
+        with jobs_lock:
+            ahead = [jobs[i] for i in job_order[: job_order.index(job["id"])] if jobs[i]["status"] in ACTIVE]
+        job["ahead"] = len(ahead)
+        if ahead:
+            first = ahead[0]
+            job["stage"] = f"排队中：前面还有 {len(ahead)} 个任务（正在处理「{first['filename']}」：{first['stage']}）"
+        else:
+            job["stage"] = "排队中，马上开始"
+    return job
 
 
 def _get_job(job_id: str) -> dict:
@@ -68,8 +125,16 @@ def _has_key(api_key: str | None) -> bool:
 
 def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, target: str,
              reflect: bool = True, terms_text: str = "", model: str | None = None, correct: bool = True) -> None:
+    if jobs[job_id].get("cancel"):
+        return  # cancelled while waiting
     try:
-        _update(job_id, status="transcribing", stage="语音识别中（首次使用某个模型时需要先下载）", progress=0.0)
+        name = model or os.getenv("WHISPER_MODEL", "small")
+        if transcriber.model_cached(name):
+            stage = "语音识别中"
+        else:
+            size = transcriber.MODEL_SIZES.get(name, "")
+            stage = f"正在下载识别模型 {name}（约 {size}，只需下载一次，请耐心等待；命令行窗口里能看到下载进度）"
+        _update(job_id, status="transcribing", stage=stage, progress=0.0)
         custom_terms = translator.parse_terms(terms_text)
         segments, lang = transcriber.transcribe(
             path,
@@ -80,7 +145,10 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
         )
         _update(job_id, language=lang, segments=[s.to_dict() for s in segments])
         if not segments:
-            raise RuntimeError("没有识别到任何语音")
+            # No speech (e.g. music with on-screen text): finish, the on-screen text tab still works.
+            _update(job_id, status="done", stage="完成（没有识别到语音，可以试试「画面文字」）", progress=1.0,
+                    finished_at=time.time())
+            return
 
         if target == "zh" and not _has_key(api_key):
             # Chinese-only without a key: use the recognised text as is.
@@ -117,6 +185,8 @@ def _run_job(job_id: str, path: str, language: str | None, api_key: str | None, 
             segments=[s.to_dict() for s in segments],
             finished_at=time.time(),
         )
+    except JobCancelled:
+        _update(job_id, status="cancelled", stage="已取消")
     except Exception as e:
         _update(job_id, status="error", stage="出错", error=str(e))
 
@@ -171,10 +241,13 @@ async def create_job(
             "error": None,
             "burn": None,
             "dub": None,
+            "screen": None,
             "theme": "",
             "terms": [],
             "created_at": time.time(),
         }
+    with jobs_lock:
+        job_order.append(job_id)
     executor.submit(_run_job, job_id, str(dest), language.strip() or None, api_key.strip() or None, target,
                     reflect not in ("0", "false", ""), terms, model or None, correct not in ("0", "false", ""))
     return {"id": job_id}
@@ -182,9 +255,24 @@ async def create_job(
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
-    job = _get_job(job_id)
+    job = _with_queue_info(_get_job(job_id))
     job.pop("media_path", None)
     return job
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Cancel a waiting job at once; a running one stops at its next progress update."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        if job["status"] not in ACTIVE:
+            raise HTTPException(409, "任务已经结束")
+        job["cancel"] = True
+        if job["status"] == "queued":
+            job.update(status="cancelled", stage="已取消")
+    return {"ok": True}
 
 
 class SegmentsUpdate(BaseModel):
@@ -209,10 +297,12 @@ def update_segments(job_id: str, body: SegmentsUpdate):
     return {"ok": True}
 
 
-def _segments(job_id: str) -> tuple[dict, list[Segment]]:
+def _segments(job_id: str, allow_empty: bool = False) -> tuple[dict, list[Segment]]:
     job = _get_job(job_id)
-    if not job["segments"]:
+    if job["status"] != "done":
         raise HTTPException(409, "字幕尚未生成")
+    if not job["segments"] and not allow_empty:
+        raise HTTPException(409, "没有字幕（没有识别到语音）")
     return job, [Segment(**s) for s in job["segments"]]
 
 
@@ -245,34 +335,197 @@ def download_mp3(job_id: str, mode: str = "bilingual"):
 
 class BurnRequest(BaseModel):
     mode: str = "bilingual"
+    screen: str | None = None  # also translate on-screen text: "replace" or "label"
+    subtitles: bool = True  # False: only the on-screen text
 
 
-def _run_burn(job_id: str, media_path: str, segments: list[Segment], mode: str, dst: Path) -> None:
+def _run_burn(job_id: str, media_path: str, segments: list[Segment], mode: str, dst: Path,
+              screen: dict | None = None) -> None:
     def progress(p: float) -> None:
         _update(job_id, burn={"status": "running", "mode": mode, "progress": round(p, 3), "error": None})
 
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         tmp = dst.with_suffix(".part.mp4")
-        burn(media_path, str(tmp), segments, mode, on_progress=progress)
+        burn(media_path, str(tmp), segments, mode, on_progress=progress, **({"screen": screen} if screen else {}))
         tmp.replace(dst)
         _update(job_id, burn={"status": "done", "mode": mode, "progress": 1.0, "error": None})
     except Exception as e:
         _update(job_id, burn={"status": "error", "mode": mode, "progress": 0.0, "error": str(e)})
 
 
+def _screen_burn_args(job: dict, how: str | None) -> dict | None:
+    """What burn() needs to translate the on-screen text, or None."""
+    if not how:
+        return None
+    if how not in ("replace", "label"):
+        raise HTTPException(400, "screen 只支持 replace / label")
+    state = job.get("screen") or {}
+    if state.get("status") != "done" or not state.get("events"):
+        raise HTTPException(409, "请先在「画面文字」里识别并翻译画面文字")
+    mode = "bilingual" if how == "label" else ("en" if state["target"] == "en" else "zh")
+    return {"events": state["events"], "mode": mode, "size": state.get("size")}
+
+
+def _start_burn(job_id: str, mode: str, screen: str | None = None, subtitles: bool = True) -> None:
+    job, segments = _segments(job_id, allow_empty=bool(screen))
+    screen_args = _screen_burn_args(job, screen)
+    if not subtitles:
+        segments = []
+    with jobs_lock:
+        if (jobs[job_id].get("burn") or {}).get("status") == "running":
+            raise HTTPException(409, "正在烧录中，请等待完成")
+        jobs[job_id]["burn"] = {"status": "running", "mode": mode, "progress": 0.0, "error": None}
+    dst = EXPORT_DIR / f"{job_id}.burned.mp4"
+    burn_executor.submit(_run_burn, job_id, job["media_path"], segments, mode, dst, screen_args)
+
+
 @app.post("/api/jobs/{job_id}/burn")
 def start_burn(job_id: str, body: BurnRequest):
     """Burn the subtitles into the video (audio-only files get a black picture)."""
     _check_mode(body.mode)
-    job, segments = _segments(job_id)
-    with jobs_lock:
-        if (jobs[job_id].get("burn") or {}).get("status") == "running":
-            raise HTTPException(409, "正在烧录中，请等待完成")
-        jobs[job_id]["burn"] = {"status": "running", "mode": body.mode, "progress": 0.0, "error": None}
-    dst = EXPORT_DIR / f"{job_id}.burned.mp4"
-    burn_executor.submit(_run_burn, job_id, job["media_path"], segments, body.mode, dst)
+    if not body.subtitles and not body.screen:
+        raise HTTPException(400, "没有要烧录的内容")
+    _start_burn(job_id, body.mode, body.screen, body.subtitles)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- text in the video picture
+
+class ScreenRequest(BaseModel):
+    target: str = "orig_zh"
+    ocr_lang: str = "auto"
+    interval: float = 1.0
+    api_key: str = ""
+    terms: str = ""
+
+
+def _run_screen(job_id: str, media_path: str, req: ScreenRequest) -> None:
+    state = {"status": "running", "target": req.target, "progress": 0.0, "error": None, "events": [], "size": None}
+
+    def update(**fields):
+        state.update(fields)
+        _update(job_id, screen=dict(state))
+
+    try:
+        update(stage="识别画面文字中（首次使用某种语言时需要下载模型）")
+        events, size = screen_text.scan(media_path, req.ocr_lang, req.interval,
+                                        on_progress=lambda p: update(progress=round(p * 0.6, 3)))
+        update(events=events, size=size, stage="DeepSeek 校正、翻译画面文字中", progress=0.6)
+        if events:
+            screen_text.translate_events(
+                events, req.target, req.api_key or None, req.ocr_lang, translator.parse_terms(req.terms),
+                on_progress=lambda p: update(progress=round(0.6 + p * 0.4, 3)),
+            )
+        update(status="done", stage=f"完成，识别到 {len(events)} 段画面文字", progress=1.0, events=events)
+    except Exception as e:
+        update(status="error", stage="出错", error=str(e))
+
+
+@app.post("/api/jobs/{job_id}/screen")
+def start_screen(job_id: str, req: ScreenRequest):
+    """Find, track and translate the text shown in the video picture."""
+    if req.target not in image_translate.TARGETS:
+        raise HTTPException(400, f"target 只支持 {' / '.join(image_translate.TARGETS)}")
+    if req.ocr_lang not in image_translate.OCR_LANGS:
+        raise HTTPException(400, f"ocr_lang 只支持 {' / '.join(image_translate.OCR_LANGS)}")
+    if req.interval not in screen_text.INTERVALS:
+        raise HTTPException(400, f"interval 只支持 {' / '.join(map(str, screen_text.INTERVALS))}")
+    if not _has_key(req.api_key.strip()):
+        raise HTTPException(400, "请填写 DeepSeek API Key，或在服务端 .env 中配置 DEEPSEEK_API_KEY")
+    job = _get_job(job_id)
+    if job["status"] != "done":
+        raise HTTPException(409, "请等字幕生成完成后再识别画面文字")
+    with jobs_lock:
+        if (jobs[job_id].get("screen") or {}).get("status") == "running":
+            raise HTTPException(409, "正在识别画面文字，请等待完成")
+        jobs[job_id]["screen"] = {"status": "running", "target": req.target, "progress": 0.0, "error": None,
+                                  "events": [], "size": None, "stage": "排队中"}
+    image_executor.submit(_run_screen, job_id, job["media_path"], req)
+    return {"ok": True}
+
+
+@app.get("/api/jobs/{job_id}/screen.srt")
+def download_screen_srt(job_id: str):
+    job = _get_job(job_id)
+    state = job.get("screen") or {}
+    if state.get("status") != "done":
+        raise HTTPException(409, "还没有识别画面文字")
+    mode = image_translate.TARGETS[state["target"]][1]
+    return PlainTextResponse(screen_text.to_srt(state["events"], mode), media_type="application/x-subrip; charset=utf-8",
+                             headers={"Content-Disposition": _attachment(job, "screen", "srt")})
+
+
+# ---------------------------------------------------------------- batch
+
+BRIEF_FIELDS = ("id", "filename", "status", "stage", "progress", "error", "target", "language", "burn", "dub")
+
+
+@app.get("/api/jobs")
+def list_jobs(ids: str = ""):
+    """Short status of several jobs (no subtitles), for the batch queue."""
+    with jobs_lock:
+        briefs = [{k: jobs[i].get(k) for k in BRIEF_FIELDS} for i in ids.split(",") if i in jobs]
+    return [_with_queue_info(b) for b in briefs]
+
+
+class BatchRequest(BaseModel):
+    ids: list[str]
+    mode: str = "bilingual"
+    fmt: str = "srt"
+
+
+def _mode_for(job: dict, mode: str) -> str:
+    """The requested mode, or the closest one this job has (Chinese-only jobs only have zh)."""
+    if job.get("target") == "zh":
+        return "zh"
+    if mode == "orig" and job.get("language") in ("zh", "en"):
+        return "bilingual"
+    return mode
+
+
+@app.post("/api/batch/subtitles.zip")
+def batch_subtitles(body: BatchRequest):
+    """Subtitles of every finished job in one ZIP."""
+    if body.fmt not in SUBTITLE_TYPES:
+        raise HTTPException(400, "格式只支持 srt / vtt / lrc")
+    _check_mode(body.mode)
+    buffer, names = io.BytesIO(), set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for job_id in body.ids:
+            with jobs_lock:
+                job = dict(jobs.get(job_id) or {})
+            if job.get("status") != "done" or not job.get("segments"):
+                continue
+            mode = _mode_for(job, body.mode)
+            segments = [Segment(**s) for s in job["segments"]]
+            content = {"srt": to_srt, "vtt": to_vtt, "lrc": to_lrc}[body.fmt](segments, mode)
+            name = f"{Path(job['filename'] or job_id).stem}.{mode}.{body.fmt}"
+            n = 2
+            while name in names:  # two uploads with the same file name
+                name = f"{Path(job['filename'] or job_id).stem} ({n}).{mode}.{body.fmt}"
+                n += 1
+            names.add(name)
+            zf.writestr(name, content)
+    if not names:
+        raise HTTPException(409, "还没有处理完成的任务")
+    headers = {"Content-Disposition": f"attachment; filename=subtitles_{body.mode}_{body.fmt}.zip"}
+    return Response(buffer.getvalue(), media_type="application/zip", headers=headers)
+
+
+@app.post("/api/batch/burn")
+def batch_burn(body: BatchRequest):
+    """Queue burning for every finished job (one video at a time)."""
+    _check_mode(body.mode)
+    started = []
+    for job_id in body.ids:
+        with jobs_lock:
+            job = dict(jobs.get(job_id) or {})
+        if job.get("status") != "done" or (job.get("burn") or {}).get("status") == "running":
+            continue
+        _start_burn(job_id, _mode_for(job, body.mode))
+        started.append(job_id)
+    return {"started": started}
 
 
 class DubRequest(BaseModel):

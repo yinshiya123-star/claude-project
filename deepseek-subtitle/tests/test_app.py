@@ -759,3 +759,228 @@ def test_image_api(monkeypatch, tmp_path):
     assert r.headers["content-type"] == "image/png" and "menu.translated.png" in r.headers["content-disposition"]
     assert client.get(f"/api/images/{image_id}/text.txt").text == "zh意译:校:Fresh fruit juice\n"
     assert client.get(f"/api/images/{image_id}/source").content == sign.read_bytes()
+
+
+def test_pages_are_never_stale():
+    client = TestClient(main.app)
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-store"
+    assert 'href="style.css?v=' in r.text and 'src="app.js?v=' in r.text  # versioned assets
+    assert client.get("/style.css").headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/api/config").headers
+
+
+def test_batch_endpoints(monkeypatch, tmp_path):
+    import io
+    import zipfile
+
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main, "EXPORT_DIR", tmp_path / "exports")
+    monkeypatch.setattr(main.transcriber, "transcribe",
+                        lambda path, language=None, on_progress=None, **kw: ([Segment(1, 0, 1, "Hello")], "en"))
+
+    def fake_translate(segments, **kw):
+        segments[0].zh, segments[0].en = "你好", "Hello"
+        return {"theme": "", "terms": []}
+
+    monkeypatch.setattr(main.translator, "translate", fake_translate)
+    burned = []
+    monkeypatch.setattr(main, "burn", lambda src, dst, segs, mode, on_progress=None: (burned.append(mode), Path(dst).write_bytes(b"v")))
+    client = TestClient(main.app)
+    ids = [client.post("/api/jobs", files={"file": (name, b"x")}, data={"api_key": "k", **extra}).json()["id"]
+           for name, extra in (("a.mp4", {}), ("a.mp4", {}), ("b.mp3", {"target": "zh"}))]
+    for _ in range(100):
+        brief = client.get(f"/api/jobs?ids={','.join(ids)},missing").json()
+        if all(b["status"] == "done" for b in brief):
+            break
+        time.sleep(0.05)
+    assert [b["id"] for b in brief] == ids and "segments" not in brief[0]
+    r = client.post("/api/batch/subtitles.zip", json={"ids": ids, "mode": "en", "fmt": "srt"})
+    names = sorted(zipfile.ZipFile(io.BytesIO(r.content)).namelist())
+    assert names == ["a (2).en.srt", "a.en.srt", "b.zh.srt"]  # Chinese-only job falls back to zh, names deduplicated
+    assert client.post("/api/batch/subtitles.zip", json={"ids": ["nope"]}).status_code == 409
+    r = client.post("/api/batch/burn", json={"ids": ids, "mode": "bilingual"})
+    assert sorted(r.json()["started"]) == sorted(ids)
+    for _ in range(100):
+        if all((b["burn"] or {}).get("status") == "done" for b in client.get(f"/api/jobs?ids={','.join(ids)}").json()):
+            break
+        time.sleep(0.05)
+    assert sorted(burned) == ["bilingual", "bilingual", "zh"]
+
+
+def _text_video(tmp_path):
+    """4 s at 10 fps: "Welcome" the whole time, "Big Sale Today" from 1 s to 3 s."""
+    import av
+    import numpy as np
+    import pytest
+    from PIL import Image, ImageDraw, ImageFont
+
+    from app.burn import find_font
+
+    try:
+        font = ImageFont.truetype(find_font(), 44)
+    except RuntimeError:
+        pytest.skip("no CJK font installed")
+    path = tmp_path / "text.mp4"
+    with av.open(str(path), "w") as out:
+        stream = out.add_stream("libx264", rate=10)
+        stream.width, stream.height, stream.pix_fmt = 640, 360, "yuv420p"
+        for i in range(40):
+            img = Image.new("RGB", (640, 360), (30, 60, 110))
+            draw = ImageDraw.Draw(img)
+            draw.text((40, 40), "Welcome", font=font, fill=(255, 255, 255))
+            if 10 <= i < 30:
+                draw.text((40, 200), "Big Sale Today", font=font, fill=(255, 210, 0))
+            frame = av.VideoFrame.from_ndarray(np.asarray(img), format="rgb24")
+            frame.pts = i
+            out.mux(stream.encode(frame))
+        out.mux(stream.encode(None))
+    return path
+
+
+def test_screen_text_scan_tracks_events(tmp_path):
+    import pytest
+
+    pytest.importorskip("rapidocr")
+    from app import screen_text
+
+    events, size = screen_text.scan(str(_text_video(tmp_path)), interval=0.5)
+    assert size == [640, 360]
+    by_text = {e["text"].lower(): e for e in events}
+    welcome = next(e for t, e in by_text.items() if "welcome" in t)
+    sale = next(e for t, e in by_text.items() if "sale" in t)
+    assert welcome["start"] == 0 and welcome["end"] >= 3.5  # one event for the whole video
+    assert 0.5 <= sale["start"] <= 1.0 and 2.9 <= sale["end"] <= 3.6  # appears and disappears on time
+    assert min(p[1] for p in sale["box"]) > 150  # box in full-resolution coordinates
+    assert len(events) == 2
+
+
+def test_screen_srt():
+    from app.screen_text import to_srt
+
+    events = [{"start": 1.0, "end": 2.5, "text": "OPEN", "zh": "营业中", "en": "OPEN", "box": []}]
+    assert to_srt(events, "zh") == "1\n00:00:01,000 --> 00:00:02,500\n{\\an8}营业中\n"
+    assert to_srt(events, "bilingual").endswith("{\\an8}OPEN\n营业中\n")
+
+
+def test_burn_replaces_on_screen_text(tmp_path):
+    import numpy as np
+
+    from app.burn import burn
+
+    src = _text_video(tmp_path)
+    out = tmp_path / "out.mp4"
+    events = [{"id": 1, "start": 1.0, "end": 3.0, "box": [[38, 195], [400, 195], [400, 255], [38, 255]],
+               "text": "Big Sale Today", "zh": "今日大促", "en": ""}]
+    burn(str(src), str(out), [], "zh", screen={"events": events, "mode": "zh", "size": [640, 360]})
+    before, during = _frame_at(src, 2.0), _frame_at(out, 2.0)
+    box = (slice(200, 250), slice(40, 400))
+    yellow = lambda f: ((f[box][..., 0] > 200) & (f[box][..., 1] > 150) & (f[box][..., 2] < 100)).sum()  # noqa: E731
+    assert yellow(before) > 300 and yellow(during) > 50  # translation drawn in the original colour
+    assert abs(before[box].astype(int) - during[box].astype(int)).mean() > 10  # original text replaced
+    assert abs(_frame_at(src, 0.2)[box].astype(int) - _frame_at(out, 0.2)[box].astype(int)).mean() < 3  # not before 1 s
+
+
+def test_screen_api_and_burn_options(monkeypatch, tmp_path):
+    from app import screen_text
+
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main, "EXPORT_DIR", tmp_path / "exports")
+    monkeypatch.setattr(main.transcriber, "transcribe", lambda path, language=None, on_progress=None, **kw: ([], None))
+    monkeypatch.setattr(screen_text, "scan", lambda path, lang, interval, on_progress=None: (
+        [{"id": 1, "start": 0.0, "end": 2.0, "box": [[0, 0], [10, 0], [10, 10], [0, 10]], "text": "OPEN", "score": 0.9}], [640, 360]))
+    _use_fake(monkeypatch)
+    calls = []
+    monkeypatch.setattr(main, "burn", lambda src, dst, segs, mode, on_progress=None, screen=None: (
+        calls.append((segs, mode, screen)), Path(dst).write_bytes(b"v")))
+    client = TestClient(main.app)
+    job_id = client.post("/api/jobs", files={"file": ("a.mp4", b"x")}, data={"api_key": "k"}).json()["id"]
+
+    def wait(pred):
+        for _ in range(100):
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if pred(job):
+                return job
+            time.sleep(0.05)
+        raise AssertionError(job)
+
+    job = wait(lambda j: j["status"] in ("done", "error"))
+    assert job["status"] == "done" and job["segments"] == []  # no speech is not an error any more
+    assert client.post(f"/api/jobs/{job_id}/burn", json={"mode": "zh"}).status_code == 409  # nothing to burn yet
+    assert client.post(f"/api/jobs/{job_id}/burn", json={"mode": "zh", "screen": "replace"}).status_code == 409
+    assert client.post(f"/api/jobs/{job_id}/screen", json={"interval": 3}).status_code == 400
+    assert client.post(f"/api/jobs/{job_id}/screen", json={"target": "zh", "api_key": "k"}).status_code == 200
+    job = wait(lambda j: (j["screen"] or {}).get("status") in ("done", "error"))
+    assert job["screen"]["status"] == "done", job["screen"]
+    assert job["screen"]["events"][0]["zh"] == "zh意译:校:OPEN"
+    assert "{\\an8}zh意译:校:OPEN" in client.get(f"/api/jobs/{job_id}/screen.srt").text
+    r = client.post(f"/api/jobs/{job_id}/burn", json={"mode": "zh", "screen": "replace", "subtitles": False})
+    assert r.status_code == 200
+    wait(lambda j: (j["burn"] or {}).get("status") == "done")
+    segs, mode, screen = calls[-1]
+    assert segs == [] and screen["mode"] == "zh" and screen["size"] == [640, 360]
+
+
+def test_queue_position_and_cancel(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main.transcriber, "model_cached", lambda name=None: True)
+    release = threading.Event()
+
+    def slow_transcribe(path, language=None, on_progress=None, **kw):
+        while not release.is_set():  # a long job that reports progress, like Whisper
+            on_progress(0.5)
+            time.sleep(0.02)
+        return [Segment(1, 0, 1, "hi")], "en"
+
+    monkeypatch.setattr(main.transcriber, "transcribe", slow_transcribe)
+    monkeypatch.setattr(main.translator, "translate", lambda segments, **kw: {"theme": "", "terms": []})
+    client = TestClient(main.app)
+    a, b, c = (client.post("/api/jobs", files={"file": (f"{n}.mp4", b"x")}, data={"api_key": "k"}).json()["id"]
+               for n in "abc")
+    for _ in range(50):
+        if client.get(f"/api/jobs/{a}").json()["status"] == "transcribing":
+            break
+        time.sleep(0.02)
+    job_c = client.get(f"/api/jobs/{c}").json()
+    assert job_c["status"] == "queued" and job_c["ahead"] == 2
+    assert "前面还有 2 个任务" in job_c["stage"] and "a.mp4" in job_c["stage"]
+
+    assert client.post(f"/api/jobs/{b}/cancel").json() == {"ok": True}  # waiting: cancelled at once
+    assert client.get(f"/api/jobs/{b}").json()["status"] == "cancelled"
+    assert client.get(f"/api/jobs/{c}").json()["ahead"] == 1
+
+    assert client.post(f"/api/jobs/{a}/cancel").status_code == 200  # running: stops at next progress update
+    for _ in range(100):
+        if client.get(f"/api/jobs/{a}").json()["status"] == "cancelled":
+            break
+        time.sleep(0.02)
+    assert client.get(f"/api/jobs/{a}").json()["status"] == "cancelled"
+    release.set()
+    for _ in range(100):
+        if client.get(f"/api/jobs/{c}").json()["status"] == "done":
+            break
+        time.sleep(0.02)
+    assert client.get(f"/api/jobs/{c}").json()["status"] == "done"  # the queue moves on
+    assert client.post(f"/api/jobs/{c}/cancel").status_code == 409
+
+
+def test_model_download_is_announced(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(main.transcriber, "model_cached", lambda name=None: False)
+    stages = []
+
+    def transcribe(path, language=None, on_progress=None, **kw):
+        stages.append(next(j["stage"] for j in main.jobs.values() if j["media_path"] == path))
+        return [], None
+
+    monkeypatch.setattr(main.transcriber, "transcribe", transcribe)
+    client = TestClient(main.app)
+    job_id = client.post("/api/jobs", files={"file": ("a.mp4", b"x")}, data={"api_key": "k", "model": "large-v3-turbo"}).json()["id"]
+    for _ in range(100):
+        if client.get(f"/api/jobs/{job_id}").json()["status"] == "done":
+            break
+        time.sleep(0.02)
+    assert stages, {k: v for k, v in client.get(f"/api/jobs/{job_id}").json().items() if k in ("status", "stage", "error")}
+    assert "正在下载识别模型 large-v3-turbo" in stages[0] and "1.6 GB" in stages[0]

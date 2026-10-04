@@ -62,8 +62,9 @@ let voices = {};
 fetch("/api/config").then((r) => r.json()).then((cfg) => {
   serverKey = cfg.server_key_configured;
   if (serverKey) apiKeyInput.placeholder = "服务端已配置 Key，可留空";
-  const ocr = $("#ocr-lang");
-  for (const [value, label] of Object.entries(cfg.ocr_langs || {})) ocr.add(new Option(label, value));
+  for (const select of [$("#ocr-lang"), $("#screen-lang")]) {
+    for (const [value, label] of Object.entries(cfg.ocr_langs || {})) select.add(new Option(label, value));
+  }
   updateTargetUi();
 }).catch(() => {});
 fetch("/api/voices").then((r) => r.json()).then((v) => (voices = v)).catch(() => {});
@@ -74,7 +75,6 @@ const dropzone = $("#dropzone");
 const startBtn = $("#start-btn");
 const targetInput = $("#target");
 const languageSelect = $("#language");
-let selectedFile = null;
 let model = store.get("model") || "small";
 
 segmented($("#target-seg"), (value) => { targetInput.value = value; updateTargetUi(); });
@@ -97,19 +97,26 @@ function updateTargetUi() {
     ? "DeepSeek API Key（仅中文模式可不填，填写后会校正识别文本）" : "DeepSeek API Key";
 }
 
-function pickFile(file) {
-  if (!file) return;
-  selectedFile = file;
-  $("#drop-text").textContent = `${file.name}（${(file.size / 1024 / 1024).toFixed(1)} MB）`;
+const MEDIA_RE = /\.(mp3|mp4|m4a|wav|flac|ogg|aac|webm|mov|mkv)$/i;
+let selectedFiles = [];
+
+function pickFiles(files) {
+  selectedFiles = files.filter((f) => MEDIA_RE.test(f.name) || /^(audio|video)\//.test(f.type));
+  if (!selectedFiles.length) return;
+  const size = selectedFiles.reduce((n, f) => n + f.size, 0) / 1024 / 1024;
+  $("#drop-text").textContent = selectedFiles.length === 1
+    ? `${selectedFiles[0].name}（${size.toFixed(1)} MB）`
+    : `已选择 ${selectedFiles.length} 个文件（共 ${size.toFixed(1)} MB），将按顺序批量处理`;
   startBtn.disabled = false;
+  startBtn.textContent = selectedFiles.length > 1 ? `批量生成 ${selectedFiles.length} 个文件的字幕` : "开始生成字幕";
 }
 function setupDrop(zone, onFiles) {
   ["dragenter", "dragover"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("over"); }));
   ["dragleave", "drop"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove("over"); }));
   zone.addEventListener("drop", (e) => onFiles(Array.from(e.dataTransfer.files)));
 }
-fileInput.addEventListener("change", () => pickFile(fileInput.files[0]));
-setupDrop(dropzone, (files) => pickFile(files[0]));
+fileInput.addEventListener("change", () => { pickFiles(Array.from(fileInput.files)); fileInput.value = ""; });
+setupDrop(dropzone, pickFiles);
 
 const STEPS = ["upload", "transcribe", "translate", "done"];
 function setStep(step) {
@@ -125,73 +132,217 @@ function setProgress(stage, p) {
   $("#bar-fill").style.width = `${p * 100}%`;
 }
 
-let jobId = null;
+let jobId = null; // the job shown in the results area
 let job = null;
 
-startBtn.addEventListener("click", () => {
-  if (!selectedFile) return;
+// ---------------------------------------------------------------- queue (one or many files)
+const queue = []; // {file, name, id, status, stage, progress, error, burn}
+let polling = false;
+
+function uploadOptions() {
+  return {
+    target: targetInput.value,
+    language: languageSelect.value,
+    api_key: apiKeyInput.value.trim(),
+    reflect: $("#reflect").checked ? "1" : "0",
+    correct: $("#correct").checked ? "1" : "0",
+    terms: termsInput.value,
+    model,
+  };
+}
+
+function upload(item, options) {
+  return new Promise((resolve) => {
+    const form = new FormData();
+    form.append("file", item.file);
+    for (const [k, v] of Object.entries(options)) form.append(k, v);
+    // XHR instead of fetch so we can show upload progress.
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/jobs");
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      item.stage = `上传中 ${Math.round((e.loaded / e.total) * 100)}%`;
+      item.progress = 0;
+      renderQueue();
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 400) Object.assign(item, { status: "error", stage: "出错", error: data.detail || `上传失败（${xhr.status}）` });
+      else Object.assign(item, { id: data.id, status: "queued", stage: "排队中" });
+      renderQueue();
+      resolve();
+    };
+    xhr.onerror = () => {
+      Object.assign(item, { status: "error", stage: "出错", error: "网络错误，上传失败" });
+      renderQueue();
+      resolve();
+    };
+    xhr.send(form);
+  });
+}
+
+startBtn.addEventListener("click", async () => {
+  if (!selectedFiles.length) return;
   showError($("#upload-error"), "");
   showError($("#job-error"), "");
-  $("#result-card").hidden = true;
+  const options = uploadOptions();
+  const items = selectedFiles.map((file) => ({ file, name: file.name, status: "uploading", stage: "等待上传", progress: 0 }));
+  queue.push(...items);
+  selectedFiles = [];
   startBtn.disabled = true;
-
-  const form = new FormData();
-  form.append("file", selectedFile);
-  form.append("target", targetInput.value);
-  form.append("language", languageSelect.value);
-  form.append("api_key", apiKeyInput.value.trim());
-  form.append("reflect", $("#reflect").checked ? "1" : "0");
-  form.append("correct", $("#correct").checked ? "1" : "0");
-  form.append("terms", termsInput.value);
-  form.append("model", model);
-
-  // XHR instead of fetch so we can show upload progress.
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/jobs");
+  startBtn.textContent = "开始生成字幕";
+  $("#drop-text").textContent = "点击或拖拽音频 / 视频到这里（可一次选多个，批量处理）";
   $("#progress-card").hidden = false;
-  setStep("upload");
-  setProgress("上传中", 0);
-  xhr.upload.onprogress = (e) => { if (e.lengthComputable) setProgress("上传中", e.loaded / e.total); };
-  xhr.onload = () => {
-    let data = {};
-    try { data = JSON.parse(xhr.responseText); } catch {}
-    if (xhr.status >= 400) {
-      $("#progress-card").hidden = true;
-      showError($("#upload-error"), data.detail || `上传失败（${xhr.status}）`);
-      startBtn.disabled = false;
-      return;
-    }
-    jobId = data.id;
-    poll();
-  };
-  xhr.onerror = () => {
-    $("#progress-card").hidden = true;
-    showError($("#upload-error"), "网络错误，上传失败");
-    startBtn.disabled = false;
-  };
-  xhr.send(form);
+  renderQueue();
+  pollQueue();
+  for (const item of items) await upload(item, options); // one after another
+  const failed = items.find((i) => i.status === "error");
+  if (items.length === 1 && failed) showError($("#upload-error"), failed.error);
 });
 
-async function poll() {
-  let data;
-  try {
-    data = await (await fetch(`/api/jobs/${jobId}`)).json();
-  } catch {
-    setTimeout(poll, 2000);
-    return;
+const finished = (item) => ["done", "error", "cancelled"].includes(item.status);
+const ACTIVE = ["queued", "transcribing", "translating"];
+
+async function cancelItem(item) {
+  if (!item.id) return;
+  const res = await fetch(`/api/jobs/${item.id}/cancel`, { method: "POST" });
+  if (res.ok && item.status === "queued") Object.assign(item, { status: "cancelled", stage: "已取消" });
+  else if (res.ok) item.stage = "正在取消…";
+  renderQueue();
+}
+const busy = (item) => !finished(item) || (item.burn && item.burn.status === "running");
+
+async function pollQueue() {
+  if (polling) return;
+  polling = true;
+  while (queue.some(busy)) {
+    const ids = queue.filter((i) => i.id && busy(i)).map((i) => i.id);
+    if (ids.length) {
+      try {
+        const list = await (await fetch(`/api/jobs?ids=${ids.join(",")}`)).json();
+        for (const brief of list) {
+          const item = queue.find((i) => i.id === brief.id);
+          const wasDone = item.status === "done";
+          Object.assign(item, brief);
+          if (!wasDone && item.status === "done" && !jobId) openJob(item.id); // show the first result
+        }
+      } catch {}
+    }
+    renderQueue();
+    await new Promise((r) => setTimeout(r, 1500));
   }
-  setProgress(data.stage, data.progress || 0);
-  setStep({ translating: "translate", done: "done" }[data.status] || "transcribe");
-  if (data.status === "done") {
-    startBtn.disabled = false;
-    showResult(data);
-  } else if (data.status === "error") {
-    startBtn.disabled = false;
-    showError($("#job-error"), data.error || "处理失败");
-  } else {
-    setTimeout(poll, 1500);
+  renderQueue();
+  polling = false;
+}
+
+// The progress card follows the first unfinished file (or the last one).
+function renderProgress() {
+  const focus = queue.find((i) => !finished(i)) || queue[queue.length - 1];
+  if (!focus) return;
+  const n = queue.length > 1 ? `（${queue.indexOf(focus) + 1}/${queue.length}）${focus.name} · ` : "";
+  setProgress(n + focus.stage, focus.status === "uploading" ? 0 : focus.progress || 0);
+  setStep(focus.status === "uploading" ? "upload"
+    : ({ translating: "translate", done: "done" }[focus.status] || "transcribe"));
+  showError($("#job-error"), queue.length === 1 && focus.status === "error" ? focus.error : "");
+  const cancel = $("#cancel-btn");
+  cancel.hidden = !(focus.id && ACTIVE.includes(focus.status));
+  cancel.textContent = queue.length > 1 ? "取消当前文件" : "取消";
+  cancel.onclick = () => cancelItem(focus);
+}
+
+function renderQueue() {
+  renderProgress();
+  $("#queue-card").hidden = queue.length < 2;
+  const done = queue.filter((i) => i.status === "done").length;
+  $("#queue-count").textContent = `${done} / ${queue.length} 个已完成`;
+  const list = $("#queue-list");
+  list.innerHTML = "";
+  for (const item of queue) {
+    const li = document.createElement("li");
+    li.className = "queue-item" + (item.id && item.id === jobId ? " selected" : "");
+    const info = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "queue-name";
+    name.textContent = item.name;
+    name.title = item.name;
+    const stage = document.createElement("div");
+    stage.className = "queue-stage";
+    stage.textContent = item.status === "error" ? `出错：${item.error}` : item.stage;
+    info.append(name, stage);
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("div");
+    fill.style.width = `${(item.status === "done" ? 1 : item.progress || 0) * 100}%`;
+    bar.appendChild(fill);
+
+    const btns = document.createElement("div");
+    btns.className = "queue-btns";
+    if (item.burn) {
+      const b = item.burn;
+      const el = document.createElement(b.status === "done" ? "a" : "span");
+      el.className = "badge" + (b.status === "done" ? " done" : b.status === "error" ? " error" : "");
+      el.textContent = b.status === "done" ? "⬇ 烧录视频" : b.status === "error" ? "烧录失败" : `烧录 ${Math.round((b.progress || 0) * 100)}%`;
+      if (b.status === "done") el.href = `/api/jobs/${item.id}/burned.mp4`;
+      if (b.status === "error") el.title = b.error;
+      btns.appendChild(el);
+    }
+    if (item.id && ACTIVE.includes(item.status)) {
+      const cancel = document.createElement("button");
+      cancel.className = "ghost small";
+      cancel.textContent = "取消";
+      cancel.onclick = () => cancelItem(item);
+      btns.appendChild(cancel);
+    }
+    if (item.status === "done") {
+      const view = document.createElement("button");
+      view.className = "ghost small";
+      view.textContent = item.id === jobId ? "正在查看" : "查看";
+      view.disabled = item.id === jobId;
+      view.onclick = () => openJob(item.id);
+      btns.appendChild(view);
+    }
+    li.append(info, bar, btns);
+    list.appendChild(li);
   }
 }
+
+async function openJob(id) {
+  try {
+    const data = await (await fetch(`/api/jobs/${id}`)).json();
+    if (dirty && jobId && jobId !== id && !confirm("当前字幕有未保存的修改，切换后会丢失，继续吗？")) return;
+    jobId = id;
+    showResult(data);
+    renderQueue();
+  } catch {}
+}
+
+function batchBody() {
+  return JSON.stringify({ ids: queue.filter((i) => i.id).map((i) => i.id), mode: $("#batch-mode").value, fmt: $("#batch-fmt").value });
+}
+
+$("#batch-zip").addEventListener("click", async () => {
+  showError($("#queue-error"), "");
+  if (dirty && !(await save())) return;
+  try {
+    await fetchDownload("/api/batch/subtitles.zip", { method: "POST", headers: { "Content-Type": "application/json" }, body: batchBody() });
+  } catch (err) {
+    showError($("#queue-error"), err.message);
+  }
+});
+
+$("#batch-burn").addEventListener("click", async () => {
+  showError($("#queue-error"), "");
+  if (dirty && !(await save())) return;
+  const res = await fetch("/api/batch/burn", { method: "POST", headers: { "Content-Type": "application/json" }, body: batchBody() });
+  if (!res.ok) return showError($("#queue-error"), await errorText(res, `烧录失败（${res.status}）`));
+  const { started } = await res.json();
+  if (!started.length) return showError($("#queue-error"), "没有可以烧录的任务（需要先处理完成）");
+  for (const item of queue) if (started.includes(item.id)) item.burn = { status: "running", progress: 0 };
+  renderQueue();
+  pollQueue();
+});
 
 // ---------------------------------------------------------------- results
 const player = $("#player");
@@ -241,7 +392,9 @@ function showResult(data) {
   renderDownloads();
   renderBurn();
   renderDub();
+  renderScreen();
   renderSummary();
+  $("#no-speech").hidden = segments.length > 0;
   $("#result-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -393,11 +546,13 @@ function renderDownloads() {
   }
 }
 
-async function fetchDownload(url) {
-  const res = await fetch(url);
+async function fetchDownload(url, options) {
+  const res = await fetch(url, options);
   if (!res.ok) throw new Error(await errorText(res, `下载失败（${res.status}）`));
   const blob = await res.blob();
-  const name = /filename\*=UTF-8''([^;]+)/.exec(res.headers.get("Content-Disposition") || "");
+  const header = res.headers.get("Content-Disposition") || "";
+  const match = /filename\*=UTF-8''([^;]+)/.exec(header) || /filename="?([^";]+)"?/.exec(header);
+  const name = match && [null, match[1]];
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = name ? decodeURIComponent(name[1]) : "download";
@@ -461,10 +616,18 @@ const BURN_LABELS = {
   done: (s) => `下载烧录好的视频（${MODE_LABELS[s.mode]}）`,
   url: () => `/api/jobs/${jobId}/burned.mp4`,
 };
-const showBurn = (state) => showTask("burn", state, BURN_LABELS);
+const showBurn = (state) => {
+  showTask("burn", state, BURN_LABELS);
+  if (job) updateBurnScreen(); // also depends on subtitles / on-screen text being there
+};
 
 function renderBurn() {
   fillModes($("#burn-mode"));
+  if (!segments.length) {
+    $("#burn-mode").innerHTML = "";
+    $("#burn-mode").add(new Option("没有对白字幕", "zh"));
+  }
+  updateBurnScreen();
   showBurn(job.burn);
   if (job.burn && job.burn.status === "running") pollTask("burn", showBurn);
 }
@@ -473,8 +636,11 @@ $("#burn-btn").addEventListener("click", async () => {
   if (dirty && !(await save())) return; // burn what the user sees
   $("#burn-btn").disabled = true;
   const burnMode = $("#burn-mode").value;
+  const screen = $("#burn-screen").value || null;
   const res = await fetch(`/api/jobs/${jobId}/burn`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: burnMode }),
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: burnMode, screen, subtitles: segments.length > 0 }),
   });
   if (!res.ok) {
     showError($("#burn-error"), await errorText(res, `烧录失败（${res.status}）`));
@@ -483,6 +649,128 @@ $("#burn-btn").addEventListener("click", async () => {
   }
   showBurn({ status: "running", mode: burnMode, progress: 0 });
   pollTask("burn", showBurn);
+});
+
+// ---------------------------------------------------------------- text in the video picture
+const SCREEN_LABELS = {
+  running: (s) => s.stage || "识别画面文字中",
+  done: () => "下载画面文字字幕（SRT）",
+  url: () => `/api/jobs/${jobId}/screen.srt`,
+};
+let screenEvents = [];
+let screenSize = null;
+let screenTarget = "orig_zh";
+
+function showScreen(state) {
+  showTask("screen", state, SCREEN_LABELS);
+  if (state && state.status === "done") {
+    screenEvents = state.events || [];
+    screenSize = state.size;
+    screenTarget = state.target;
+    renderScreenList();
+    if (!screenEvents.length) showError($("#screen-error"), "画面里没有识别到文字");
+  }
+  updateBurnScreen();
+  drawOverlay();
+}
+
+function renderScreen() {
+  screenEvents = [];
+  screenSize = null;
+  $("#screen-list").innerHTML = "";
+  showScreen(job.screen);
+  if (job.screen && job.screen.status === "running") pollTask("screen", showScreen);
+}
+
+// The burn options for on-screen text only make sense once it has been recognised.
+function updateBurnScreen() {
+  const ready = job && job.screen && job.screen.status === "done" && (job.screen.events || []).length > 0;
+  $("#burn-screen").disabled = !ready;
+  if (!ready) $("#burn-screen").value = "";
+  $("#burn-screen-hint").hidden = ready;
+  $("#burn-btn").disabled = (!segments.length && !ready) || (job.burn && job.burn.status === "running");
+}
+
+function screenText(e) {
+  if (screenTarget === "zh") return e.zh || e.text;
+  if (screenTarget === "en") return e.en || e.text;
+  return [e.zh, e.en].filter((t) => t && t !== e.text).join(" / ") || e.text;
+}
+
+function renderScreenList() {
+  const ol = $("#screen-list");
+  ol.innerHTML = "";
+  for (const e of screenEvents) {
+    const li = document.createElement("li");
+    const time = document.createElement("span");
+    time.className = "time";
+    time.style.whiteSpace = "pre";
+    time.textContent = `${fmtTime(e.start)}
+${fmtTime(e.end)}`;
+    time.onclick = () => { player.currentTime = e.start + 0.05; player.play(); };
+    const texts = document.createElement("div");
+    const orig = document.createElement("div");
+    orig.className = "orig";
+    orig.textContent = e.text;
+    const tr = document.createElement("div");
+    tr.textContent = screenText(e);
+    texts.append(orig, tr);
+    li.append(time, texts);
+    ol.appendChild(li);
+  }
+}
+
+// Translations drawn over the picture, where the original text is.
+function drawOverlay() {
+  const layer = $("#screen-overlay");
+  layer.innerHTML = "";
+  if (!$("#screen-show").checked || !screenEvents.length || !(screenSize || player.videoWidth)) return;
+  const t = player.currentTime;
+  const w = player.clientWidth, h = player.clientHeight;
+  const vw = screenSize ? screenSize[0] : player.videoWidth, vh = screenSize ? screenSize[1] : player.videoHeight;
+  const scale = Math.min(w / vw, h / vh); // object-fit: contain
+  const ox = (w - vw * scale) / 2, oy = (h - vh * scale) / 2;
+  const below = screenTarget === "orig_zh" || screenTarget === "zh_en";
+  for (const e of screenEvents) {
+    if (t < e.start || t >= e.end) continue;
+    const xs = e.box.map((p) => p[0]), ys = e.box.map((p) => p[1]);
+    const x0 = Math.min(...xs), y0 = Math.min(...ys), x1 = Math.max(...xs), y1 = Math.max(...ys);
+    const boxH = (y1 - y0) * scale;
+    const div = document.createElement("div");
+    div.textContent = screenText(e);
+    div.style.left = `${ox + x0 * scale}px`;
+    div.style.maxWidth = `${Math.max((x1 - x0) * scale, w * 0.5)}px`;
+    div.style.fontSize = `${Math.max(11, boxH * (below ? 0.5 : 0.7))}px`;
+    div.style.top = `${oy + (below ? y1 * scale + 2 : y0 * scale)}px`;
+    if (!below) div.style.minHeight = `${boxH}px`;
+    layer.appendChild(div);
+  }
+}
+player.addEventListener("timeupdate", drawOverlay);
+player.addEventListener("seeked", drawOverlay);
+window.addEventListener("resize", drawOverlay);
+$("#screen-show").addEventListener("change", drawOverlay);
+
+$("#screen-btn").addEventListener("click", async () => {
+  $("#screen-btn").disabled = true;
+  showError($("#screen-error"), "");
+  const body = {
+    target: $("#screen-target").value,
+    ocr_lang: $("#screen-lang").value || "auto",
+    interval: Number($("#screen-interval").value),
+    api_key: apiKeyInput.value.trim(),
+    terms: termsInput.value,
+  };
+  const res = await fetch(`/api/jobs/${jobId}/screen`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    showError($("#screen-error"), await errorText(res, `识别失败（${res.status}）`));
+    $("#screen-btn").disabled = false;
+    return;
+  }
+  showScreen({ status: "running", progress: 0, stage: "排队中" });
+  pollTask("screen", showScreen);
 });
 
 // ---------------------------------------------------------------- AI dubbing

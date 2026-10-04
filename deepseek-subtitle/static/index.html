@@ -51,10 +51,10 @@
     <div id="video-panel" class="panel">
       <section class="card" id="upload-card">
         <label id="dropzone" class="dropzone" for="file-input">
-          <input id="file-input" type="file" accept=".mp3,.mp4,.m4a,.wav,.flac,.ogg,.aac,.webm,.mov,.mkv,audio/*,video/*" hidden />
+          <input id="file-input" type="file" accept=".mp3,.mp4,.m4a,.wav,.flac,.ogg,.aac,.webm,.mov,.mkv,audio/*,video/*" multiple hidden />
           <div class="drop-icon" aria-hidden="true">⬆</div>
-          <div id="drop-text" class="drop-title">点击或拖拽音频 / 视频到这里</div>
-          <div class="hint">支持 mp3、mp4、m4a、wav、mov、mkv 等格式</div>
+          <div id="drop-text" class="drop-title">点击或拖拽音频 / 视频到这里（可一次选多个，批量处理）</div>
+          <div class="hint">支持 mp3、mp4、m4a、wav、mov、mkv 等格式；多个文件会按顺序排队处理</div>
         </label>
 
         <div class="option-row">
@@ -110,13 +110,36 @@
         </ol>
         <div class="progress-head"><span id="stage">排队中</span><span id="percent">0%</span></div>
         <div class="bar"><div id="bar-fill"></div></div>
+        <div class="progress-foot"><button type="button" class="ghost small" id="cancel-btn" hidden>取消</button></div>
         <p id="job-error" class="error" hidden></p>
+      </section>
+
+      <section class="card" id="queue-card" hidden>
+        <div class="queue-head">
+          <div><span class="card-title">📋 批量队列</span> <small id="queue-count" class="hint"></small></div>
+          <div class="queue-actions">
+            <select id="batch-mode" aria-label="字幕">
+              <option value="bilingual">中英双语</option><option value="zh">中文</option>
+              <option value="en">英文</option><option value="orig">原文+中文</option>
+            </select>
+            <select id="batch-fmt" aria-label="格式">
+              <option value="srt">SRT</option><option value="vtt">VTT</option><option value="lrc">LRC</option>
+            </select>
+            <button type="button" class="ghost small" id="batch-zip">打包下载字幕</button>
+            <button type="button" class="ghost small" id="batch-burn">全部烧录</button>
+          </div>
+        </div>
+        <ol id="queue-list" class="queue-list"></ol>
+        <p id="queue-error" class="error" hidden></p>
       </section>
 
       <section id="result-card" class="results" hidden>
         <div class="player-col">
           <div class="card player-card">
-            <div class="player-wrap"><video id="player" controls playsinline></video></div>
+            <div class="player-wrap" id="player-wrap">
+              <video id="player" controls playsinline></video>
+              <div id="screen-overlay" class="screen-overlay" aria-hidden="true"></div>
+            </div>
             <div class="player-meta">
               <div class="segmented small" id="mode-toggle" role="group" aria-label="字幕显示"></div>
               <small id="seg-count"></small>
@@ -129,6 +152,7 @@
             <button class="sub-tab active" data-tab="tab-subs">📝 字幕</button>
             <button class="sub-tab" data-tab="tab-export">⬇️ 导出</button>
             <button class="sub-tab" data-tab="tab-burn">🔥 烧录</button>
+            <button class="sub-tab" data-tab="tab-screen">🖼️ 画面文字</button>
             <button class="sub-tab" data-tab="tab-dub">🎙️ AI 配音</button>
             <button class="sub-tab" data-tab="tab-terms">📚 主题术语</button>
           </nav>
@@ -139,6 +163,35 @@
               <button id="save-btn" class="ghost small" disabled>保存修改</button>
             </div>
             <ol id="segments"></ol>
+            <p id="no-speech" class="hint" hidden>没有识别到语音。如果视频里有路牌、标题、外语硬字幕等文字，可以到「🖼️ 画面文字」里识别并翻译。</p>
+          </div>
+
+          <div class="tab-body" id="tab-screen" hidden>
+            <p class="hint">识别视频画面里的文字（路牌、标题、PPT、外语硬字幕……），自动跟踪出现和消失的时间并翻译；可以叠加在播放器上预览，也可以在「烧录」里替换或标注到视频中。</p>
+            <div class="dub-grid">
+              <label class="field"><span>输出</span>
+                <select id="screen-target">
+                  <option value="orig_zh">原文 + 中文</option><option value="zh">仅中文</option>
+                  <option value="zh_en">中英双语</option><option value="en">仅英文</option>
+                </select></label>
+              <label class="field"><span>画面里的语言</span><select id="screen-lang"></select></label>
+              <label class="field"><span>采样间隔</span>
+                <select id="screen-interval">
+                  <option value="0.5">每 0.5 秒（时间更准）</option>
+                  <option value="1" selected>每 1 秒（推荐）</option>
+                  <option value="2">每 2 秒（更快）</option>
+                </select></label>
+              <label class="field"><span>播放器预览</span>
+                <label class="check-inline"><input id="screen-show" type="checkbox" checked /> 在画面上显示译文</label></label>
+            </div>
+            <button id="screen-btn" class="primary">识别并翻译画面文字</button>
+            <div id="screen-progress" class="mini-progress" hidden>
+              <div class="progress-head"><span id="screen-stage">识别中</span><span id="screen-percent">0%</span></div>
+              <div class="bar"><div id="screen-fill"></div></div>
+            </div>
+            <a id="screen-download" class="download-btn" hidden>下载画面文字字幕（SRT）</a>
+            <p id="screen-error" class="error" hidden></p>
+            <ol id="screen-list" class="screen-list"></ol>
           </div>
 
           <div class="tab-body" id="tab-export" hidden>
@@ -149,9 +202,16 @@
           <div class="tab-body" id="tab-burn" hidden>
             <p class="hint">把字幕直接画进画面，任何播放器、视频网站都能看到。纯音频会生成黑底视频。</p>
             <div class="inline-form">
-              <label class="field"><span>字幕</span><select id="burn-mode"></select></label>
+              <label class="field"><span>对白字幕</span><select id="burn-mode"></select></label>
+              <label class="field"><span>画面文字</span>
+                <select id="burn-screen">
+                  <option value="">不处理</option>
+                  <option value="replace">替换原文（擦掉原文写上译文）</option>
+                  <option value="label">在原文下方标注译文</option>
+                </select></label>
               <button id="burn-btn" class="primary">开始烧录</button>
             </div>
+            <p id="burn-screen-hint" class="hint">处理画面文字需要先在「🖼️ 画面文字」里识别。</p>
             <div id="burn-progress" class="mini-progress" hidden>
               <div class="progress-head"><span id="burn-stage">烧录中</span><span id="burn-percent">0%</span></div>
               <div class="bar"><div id="burn-fill"></div></div>

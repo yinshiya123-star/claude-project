@@ -62,10 +62,13 @@ def _engine(lang: str):
     })
 
 
-def ocr(path: str, lang: str = "auto") -> list[dict]:
-    """Text lines as {"box": [[x, y] * 4], "text", "score"}, in reading order."""
+def ocr(image, lang: str = "auto") -> list[dict]:
+    """Text lines as {"box": [[x, y] * 4], "text", "score"}, in reading order.
+    `image` is a file path or an RGB numpy array (e.g. a video frame)."""
+    if not isinstance(image, (str, bytes)) and hasattr(image, "shape"):
+        image = image[..., ::-1].copy()  # RapidOCR takes arrays as BGR
     with _lock:  # RapidOCR engines aren't thread-safe
-        result = _engine(lang)(path)
+        result = _engine(lang)(image)
     lines = []
     for box, text, score in zip(result.boxes if result.boxes is not None else [], result.txts or [], result.scores or []):
         if text.strip() and float(score) >= MIN_SCORE:
@@ -156,44 +159,83 @@ def _fit(draw, text, font_path, width, height):
         size -= 1
 
 
-def render(image_path: str, lines: list[dict], mode: str, out_path: str) -> None:
-    """Draw the translated image. mode: "zh" / "en" replace the text, "bilingual" adds labels."""
+def make_patch(arr, line: dict, mode: str, font_path: str):
+    """Overlay for one OCR line as (x, y, RGBA array), or None.
+
+    mode "zh" / "en": the text box is covered with its background colour and
+    the translation is written in, in the original text colour.
+    mode "bilingual": a dark label with the translation just below the box.
+    `arr` is the RGB picture the colours are taken from.
+    """
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
 
-    from .burn import _wrap, find_font
+    from .burn import _wrap
+
+    height_px, width_px = arr.shape[:2]
+    x0, y0, x1, y1 = _rect(line["box"])
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(width_px, x1), min(height_px, y1)
+    w, h = max(1, x1 - x0), max(1, y1 - y0)
+
+    if mode in ("zh", "en"):
+        text = line.get(mode) or line["text"]
+        bg, fg = _colors(arr, (x0, y0, x1, y1))
+        px, py = max(0, x0 - 1), max(0, y0 - 1)
+        img = Image.new("RGBA", (min(width_px, x1 + 1) - px, min(height_px, y1 + 1) - py), bg + (255,))
+        draw = ImageDraw.Draw(img)
+        font, rows, line_h = _fit(draw, text, font_path, w, h)
+        top = (y0 - py) + (h - line_h * len(rows)) / 2
+        for i, row in enumerate(rows):  # left-aligned like most text in images
+            draw.text((x0 - px, top + i * line_h), row, font=font, fill=fg + (255,))
+        return px, py, np.asarray(img)
+
+    text = " / ".join(dict.fromkeys(t for t in (line.get("zh"), line.get("en")) if t and t != line["text"]))
+    if not text:
+        return None
+    font = ImageFont.truetype(font_path, max(12, int(h * 0.55)))
+    rows = _wrap(text, font, max(w, width_px * 0.5))
+    line_h = font.getbbox("国Ag")[3]
+    label_w = int(min(width_px, max(font.getlength(r) for r in rows) + 12))
+    label_h = int(line_h * len(rows) + 8)
+    ly = y1 + 2 if y1 + 2 + label_h <= height_px else max(0, y0 - label_h - 2)
+    lx = min(x0, max(0, width_px - label_w))
+    img = Image.new("RGBA", (label_w, label_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([0, 0, label_w - 1, label_h - 1], radius=6, fill=(20, 20, 30, 215))
+    for i, row in enumerate(rows):
+        draw.text((6, 4 + i * line_h), row, font=font, fill=(255, 255, 255, 255))
+    return lx, ly, np.asarray(img)
+
+
+def composite(arr, x: int, y: int, patch) -> None:
+    """Alpha-blend an RGBA patch onto an RGB uint8 array in place (clipped to the picture)."""
+    h, w = arr.shape[:2]
+    ph, pw = patch.shape[:2]
+    x1, y1 = min(w, x + pw), min(h, y + ph)
+    if x1 <= x or y1 <= y:
+        return
+    part = patch[: y1 - y, : x1 - x].astype("float32")
+    alpha = part[..., 3:] / 255.0
+    region = arr[y:y1, x:x1].astype("float32")
+    arr[y:y1, x:x1] = (region * (1 - alpha) + part[..., :3] * alpha).astype("uint8")
+
+
+def render(image_path: str, lines: list[dict], mode: str, out_path: str) -> None:
+    """Draw the translated image. mode: "zh" / "en" replace the text, "bilingual" adds labels."""
+    import numpy as np
+    from PIL import Image
+
+    from .burn import find_font
 
     font_path = find_font()
-    img = Image.open(image_path).convert("RGB")
-    arr = np.asarray(img)
-    draw = ImageDraw.Draw(img, "RGBA")
+    source = np.asarray(Image.open(image_path).convert("RGB"))
+    out = source.copy()
     for line in lines:
-        rect = _rect(line["box"])
-        x0, y0, x1, y1 = rect
-        w, h = max(1, x1 - x0), max(1, y1 - y0)
-        if mode in ("zh", "en"):
-            text = line.get(mode) or line["text"]
-            bg, fg = _colors(arr, rect)
-            draw.rectangle([x0 - 1, y0 - 1, x1 + 1, y1 + 1], fill=bg)
-            font, rows, line_h = _fit(draw, text, font_path, w, h)
-            top = y0 + (h - line_h * len(rows)) / 2
-            for i, row in enumerate(rows):  # left-aligned like most text in images
-                draw.text((x0, top + i * line_h), row, font=font, fill=fg)
-        else:
-            text = " / ".join(t for t in (line.get("zh"), line.get("en")) if t and t != line["text"])
-            if not text:
-                continue
-            font = ImageFont.truetype(font_path, max(12, int(h * 0.55)))
-            rows = _wrap(text, font, max(w, img.width * 0.5))
-            line_h = font.getbbox("国Ag")[3]
-            label_w = max(font.getlength(r) for r in rows) + 12
-            label_h = line_h * len(rows) + 8
-            ly = y1 + 2 if y1 + 2 + label_h <= img.height else max(0, y0 - label_h - 2)
-            lx = min(max(0, x0), max(0, img.width - label_w))
-            draw.rounded_rectangle([lx, ly, lx + label_w, ly + label_h], radius=6, fill=(20, 20, 30, 215))
-            for i, row in enumerate(rows):
-                draw.text((lx + 6, ly + 4 + i * line_h), row, font=font, fill=(255, 255, 255, 255))
-    img.save(out_path)
+        patch = make_patch(source, line, mode, font_path)  # colours from the untouched picture
+        if patch is not None:
+            composite(out, *patch)
+    Image.fromarray(out).save(out_path)
 
 
 def to_text(lines: list[dict], mode: str) -> str:
