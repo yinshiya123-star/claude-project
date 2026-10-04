@@ -42,6 +42,12 @@ REF_MAX = 12.0
 LINE_MIN, LINE_MAX = 1.5, 10.0  # lines usable in a reference
 GAP = 0.2  # silence between lines in the reference
 STEPS = 4  # flow-matching steps of the distilled model
+# ZipVoice estimates how long to speak from the reference's text length vs audio length,
+# then applies `speed`. A reference whose text doesn't fit its audio, combined with a
+# high speed, makes the native code abort (seen on Linux and Windows), so references
+# only use lines with a plausible speaking rate and the speed-up is limited.
+REF_RATE = (2.0, 7.0)  # syllables per second
+MIN_SPEED, MAX_SPEED = 0.8, 1.3
 
 WORKER_MODULE = "app.clone_worker"
 MAX_RESTARTS = 2  # worker crashes tolerated per dub before giving up on cloning
@@ -247,7 +253,11 @@ def reference(audio, segments: list[Segment], line_ids: list[int], loudness: dic
     long, or None if the speaker has no usable line."""
     import numpy as np
 
+    from .voices import syllables
+
     mine = [s for s in segments if s.id in line_ids and s.text.strip()]
+    plausible = [s for s in mine if REF_RATE[0] <= syllables(s.text) / max(s.end - s.start, 0.1) <= REF_RATE[1]]
+    mine = plausible or mine
     lines = [s for s in mine if LINE_MIN <= s.end - s.start <= LINE_MAX]
     if not lines:  # only short (or very long) lines: take the ones closest to a good length
         lines = sorted(mine, key=lambda s: abs((s.end - s.start) - 4))[:3]
@@ -306,7 +316,7 @@ def speak(ref: dict, text: str, path: str, speed: float = 1.0) -> None:
                 _restarts += 1
                 _worker = _Worker()
             _worker.speak({"text": text, "ref_wav": _reference_wav(ref), "ref_text": ref["text"],
-                           "speed": round(max(0.5, min(2.0, speed)), 3), "out": path})
+                           "speed": round(max(MIN_SPEED, min(MAX_SPEED, speed)), 3), "out": path})
         except CloneCrash as e:
             if _worker is not None:
                 _worker.close()

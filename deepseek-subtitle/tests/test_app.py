@@ -1227,10 +1227,12 @@ def test_clone_reference_picks_clear_lines():
     from app import clone
 
     audio = np.zeros(40 * 16000, dtype=np.float32)
-    segs = [Segment(i, i * 4.0, i * 4.0 + 3.0, f"line{i}") for i in range(8)] + [Segment(9, 33, 33.5, "嗯")]
+    segs = [Segment(i, i * 4.0, i * 4.0 + 3.0, f"今天我们聊第{'一二三四五六七八'[i]}件事情") for i in range(8)]
+    segs += [Segment(9, 33, 33.5, "嗯"), Segment(10, 34, 37, "这一句的文字比它的声音长得多" * 3)]
     loud = {i: 0.1 * (i + 1) for i in range(8)}
+    loud[10] = 9.0  # the loudest, but its text can't be what was said in 3 s
     ref = clone.reference(audio, segs, [s.id for s in segs], loud)
-    assert ref["text"] == "line5 line6 line7"  # the loudest lines, in order, about 8 s
+    assert ref["text"] == "今天我们聊第六件事情今天我们聊第七件事情今天我们聊第八件事情"  # loudest plausible lines, ~8 s
     assert abs(len(ref["samples"]) / 16000 - (9 + 2 * clone.GAP)) < 0.01
     assert clone.reference(audio, segs, [], loud) is None
 
