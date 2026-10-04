@@ -1357,3 +1357,26 @@ def test_form_parse_errors_show_their_cause(monkeypatch, tmp_path):
     assert r.status_code == 400 and "No space left on device" in r.json()["detail"]
     assert "解析上传内容失败" in r.json()["detail"]
     assert TestClient(main.app).get("/api/jobs/nope").json()["detail"] == "任务不存在"  # other errors unchanged
+
+
+def test_upload_size_limits(monkeypatch, tmp_path):
+    import shutil
+    from collections import namedtuple
+
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
+    client = TestClient(main.app)
+    for value, expected in (("", 0), ("0", 0), ("500", 0), ("2048", 2048 * 1024 * 1024), ("x", 0)):
+        monkeypatch.setenv("MAX_UPLOAD_MB", value)
+        assert main._upload_limit() == expected  # no limit by default; the old 500 MB default is ignored
+    assert client.post("/api/uploads?name=a.mp4", content=b"x" * 5000).status_code == 200  # big files are fine
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 1000)
+    r = client.post("/api/uploads?name=a.mp4", content=b"x" * 5000)
+    assert r.status_code == 413 and "MAX_UPLOAD_MB" in r.json()["detail"]
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 0)
+    monkeypatch.setattr(main, "MAX_IMAGE_BYTES", 1000)
+    assert client.post("/api/uploads?name=a.png", content=b"x" * 5000).status_code == 413
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: usage(10, 10, 100))
+    r = client.post("/api/uploads?name=a.mp4", content=b"x" * 5000)
+    assert r.status_code == 507 and "磁盘空间不够" in r.json()["detail"]
+    assert not list(tmp_path.glob("up_*.png"))  # nothing left behind

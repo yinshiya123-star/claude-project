@@ -94,7 +94,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 翻译用的模型 |
 | `WHISPER_MODEL` | `small` | 默认识别模型（网页上可按任务选择 small / medium / large-v3-turbo） |
 | `WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto`。用 NVIDIA 显卡加速需另装 CUDA 12 和 cuDNN 9，GPU 出错时会自动退回 CPU |
-| `MAX_UPLOAD_MB` | `500` | 上传大小上限 |
+| `MAX_UPLOAD_MB` | `0` | 上传大小上限（MB），`0` 表示不限制（程序在你自己电脑上运行，默认不限制；图片固定上限 100 MB） |
 | `SUBTITLE_FONT` | 自动查找 | 烧录字幕用的字体文件路径，例如 `C:/Windows/Fonts/simhei.ttf` |
 
 ## API

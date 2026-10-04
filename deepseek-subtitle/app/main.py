@@ -37,7 +37,19 @@ STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "data" / "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR = UPLOAD_DIR.parent / "exports"
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
+def _upload_limit() -> int:
+    """Upload size limit in bytes, 0 = none (everything runs on the user's own computer).
+    500 was the old default that .env files copied from .env.example still carry."""
+    try:
+        mb = int(os.getenv("MAX_UPLOAD_MB", "0") or 0)
+    except ValueError:
+        mb = 0
+    return 0 if mb in (0, 500) else mb * 1024 * 1024
+
+
+MAX_UPLOAD_BYTES = _upload_limit()
+MAX_IMAGE_BYTES = 100 * 1024 * 1024  # images are read into memory
+DISK_RESERVE = 1024 * 1024 * 1024  # keep 1 GB free for the outputs (burned / dubbed videos)
 ALLOWED_EXT = {".mp3", ".mp4", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".webm", ".mov", ".mkv"}
 
 app = FastAPI(title="DeepSeek 字幕工坊")
@@ -270,7 +282,24 @@ def _check_ext(filename: str, allowed: set[str], what: str = "文件") -> str:
 
 
 def _too_big() -> HTTPException:
-    return HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限")
+    return HTTPException(413, f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限（可在 .env 里改 MAX_UPLOAD_MB，0 表示不限制）")
+
+
+def _over_limit(size: int) -> bool:
+    return bool(MAX_UPLOAD_BYTES) and size > MAX_UPLOAD_BYTES
+
+
+def _check_disk(incoming: int) -> None:
+    """Refuse an upload the disk can't hold, before receiving it."""
+    import shutil
+
+    try:
+        free = shutil.disk_usage(UPLOAD_DIR).free
+    except OSError:
+        return
+    if incoming and free < incoming + DISK_RESERVE:
+        raise HTTPException(507, f"磁盘空间不够：文件 {incoming / 1024**3:.1f} GB，程序所在的磁盘只剩 "
+                                 f"{free / 1024**3:.1f} GB（还要留出放生成结果的空间）。请清理磁盘，或删除 data 文件夹里的旧文件")
 
 
 def _new_job(path: Path, filename: str, content_type: str, o: JobOptions) -> str:
@@ -310,17 +339,25 @@ uploads: dict[str, dict] = {}
 @app.post("/api/uploads")
 async def upload_file(request: Request, name: str = ""):
     """Store the request body as a file; `name` is the original file name."""
-    _check_ext(name, ALLOWED_EXT | image_translate.IMAGE_EXT)
+    ext = _check_ext(name, ALLOWED_EXT | image_translate.IMAGE_EXT)
+    limit = MAX_IMAGE_BYTES if ext in image_translate.IMAGE_EXT else MAX_UPLOAD_BYTES
+    try:
+        incoming = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        incoming = 0
+    if limit and incoming > limit:
+        raise _too_big() if limit == MAX_UPLOAD_BYTES else HTTPException(413, "图片太大（上限 100 MB）")
     upload_id = uuid.uuid4().hex[:12]
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)  # the data folder may have been deleted meanwhile
-    dest = UPLOAD_DIR / f"up_{upload_id}{Path(name).suffix.lower()}"
+    _check_disk(incoming)
+    dest = UPLOAD_DIR / f"up_{upload_id}{ext}"
     size = 0
     try:
         with dest.open("wb") as out:
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise _too_big()
+                if limit and size > limit:
+                    raise _too_big() if limit == MAX_UPLOAD_BYTES else HTTPException(413, "图片太大（上限 100 MB）")
                 out.write(chunk)
     except BaseException as e:
         dest.unlink(missing_ok=True)
@@ -383,7 +420,7 @@ async def create_job(
     with dest.open("wb") as out:
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
+            if _over_limit(size):
                 out.close()
                 dest.unlink(missing_ok=True)
                 raise _too_big()
@@ -871,7 +908,7 @@ async def create_image_job(
     _check_image_options(o)
     ext = _check_ext(file.filename, image_translate.IMAGE_EXT, "图片")
     data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
+    if len(data) > MAX_IMAGE_BYTES:
         raise HTTPException(413, "图片太大")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = UPLOAD_DIR / f"img_{uuid.uuid4().hex[:12]}{ext}"
