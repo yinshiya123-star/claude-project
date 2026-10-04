@@ -1380,3 +1380,37 @@ def test_upload_size_limits(monkeypatch, tmp_path):
     r = client.post("/api/uploads?name=a.mp4", content=b"x" * 5000)
     assert r.status_code == 507 and "磁盘空间不够" in r.json()["detail"]
     assert not list(tmp_path.glob("up_*.png"))  # nothing left behind
+
+
+def test_clone_worker_crash_falls_back_to_edge_voices(monkeypatch, tmp_path):
+    import wave
+
+    import numpy as np
+
+    from app import clone
+
+    calls = []
+    dub = _fake_tts(monkeypatch, calls)
+    monkeypatch.setattr(clone, "WORKER_MODULE", "tests.fake_clone_worker")
+    monkeypatch.setattr(clone, "MODEL_DIR", tmp_path / "models")
+    monkeypatch.setattr(clone, "downloaded", lambda: True)
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object() if name == "sherpa_onnx" else real_find_spec(name, *a))
+    path = tmp_path / "talk.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(_voices_audio(), -1, 1) * 32767).astype("<i2").tobytes())
+    segs = [Segment(1, 0, 2, "low one", zh="你好"), Segment(2, 3, 5, "high", zh="崩溃了"), Segment(3, 6, 8, "low two", zh="再见")]
+    try:
+        out, speakers = dub.dub(str(path), tmp_path / "x_dubbed", segs, "zh", bg_volume=0, clone=True)
+    finally:
+        clone.shutdown()
+    assert [c[0] for c in calls] == ["崩溃了"]  # only the crashed line used an edge voice
+    assert out.exists()
+    note = speakers[-1]
+    assert "注意" in note["speaker"] and "意外退出" in note["voice"] and "native crash" in note["voice"]
+    assert (tmp_path / "clone-worker.log").exists()

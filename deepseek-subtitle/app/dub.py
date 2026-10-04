@@ -93,6 +93,10 @@ def _speak(text: str, voice: dict, path: str, rate: int) -> None:
 
         try:
             cloning.speak(clone, text, path, 1 + rate / 100)
+        except cloning.CloneCrash as e:
+            # the synthesis process died: this line gets the speaker's matched edge voice
+            voice["fell_back"] = str(e)
+            synthesize(text, voice["voice"], path, rate, voice["pitch"])
         except cloning.CloneError as e:
             raise DubError(str(e)) from e
         except Exception as e:
@@ -359,6 +363,10 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
         per_line, gains, summary = match_voices(src, segments, lang, clone)
     spans: list = []
     speech = voice_track(segments, lang, per_line, duration, step(0.0, 0.7), gains, spans)
+    fell_back = {v["fell_back"] for v in per_line.values() if v.get("fell_back")}
+    if fell_back:
+        summary.append({"speaker": "⚠️ 注意", "voice": "声音克隆出错，部分句子改用了匹配的微软神经语音："
+                        + "；".join(sorted(fell_back))[:300] + "（详细日志见 data/clone-worker.log）"})
     if has_audio:
         talking = [(s.start - DUCK_PAD[0], s.end + DUCK_PAD[1]) for s in segments] + spans
         original = duck(_load(src), talking, float(bg_volume))
