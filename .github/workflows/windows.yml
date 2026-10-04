@@ -1,0 +1,44 @@
+# The app is mostly used on Windows; the development machine is Linux. This runs the
+# tests and a real voice-cloning dub on a Windows runner.
+name: Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["deepseek-subtitle/**", ".github/workflows/windows.yml"]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: deepseek-subtitle
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Real models - voiceprints and cloned dub (as the app runs it)
+        run: python -m tests.smoke_real_models clone
+
+      - name: Upload clone log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clone-worker-log
+          path: deepseek-subtitle/data/clone-worker.log
+          if-no-files-found: ignore
+
+      - name: Diagnosis - onnxruntime and sherpa-onnx in one process (suspected crash cause)
+        continue-on-error: true
+        run: python -m tests.smoke_real_models same-process

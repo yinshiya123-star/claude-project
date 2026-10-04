@@ -1,0 +1,67 @@
+# 推送 v* 标签（例如 v1.0.0），或在 Actions 页面手动运行并填写版本号时：
+# 运行测试，把 deepseek-subtitle/ 打包成 zip 并发布到 Releases（手动运行会自动创建标签）
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（会创建同名标签），例如 v1.0.0"
+        required: true
+        default: v1.0.0
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        working-directory: deepseek-subtitle
+        run: |
+          pip install -r requirements.txt pytest httpx
+          pytest -q
+
+      - name: Build zip
+        # Python's zipfile stores non-ASCII names as UTF-8 and keeps the executable
+        # bit; the runner's zip wrote 启动.bat as "#U542f#U52a8.bat".
+        run: |
+          python - <<'PY'
+          import os, zipfile
+          version = os.environ["VERSION"]
+          with zipfile.ZipFile(f"deepseek-subtitle-{version}.zip", "w", zipfile.ZIP_DEFLATED) as z:
+              for root, dirs, files in os.walk("deepseek-subtitle"):
+                  dirs[:] = sorted(d for d in dirs if d not in ("tests", "__pycache__", ".pytest_cache"))
+                  for name in sorted(files):
+                      z.write(os.path.join(root, name))
+          PY
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          files: deepseek-subtitle-${{ env.VERSION }}.zip
+          generate_release_notes: true
+          overwrite_files: true
+          body: |
+            ## 下载使用
+
+            下载下面的 `deepseek-subtitle-${{ env.VERSION }}.zip`，解压后：
+
+            - **Windows**：安装 Python 3.12（勾选 Add python.exe to PATH），双击 `启动.bat`
+            - **macOS**：安装 Python 3.12，双击 `启动-Mac.command`（首次被拦截：右键 → 打开）
+            - **Linux**：运行 `./start.sh`
+
+            第一次运行会自动安装依赖，然后打开浏览器 http://localhost:8000 。

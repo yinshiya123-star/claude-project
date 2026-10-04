@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSeek 字幕工坊</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">字</div>
+      <div>
+        <div class="brand-name">DeepSeek 字幕工坊</div>
+        <div class="brand-sub">语音识别 · 精翻 · Netflix 级时间轴 · AI 配音 · 图片翻译</div>
+      </div>
+    </div>
+    <nav class="main-tabs" role="tablist">
+      <button class="main-tab active" data-panel="video-panel" role="tab">🎬 视频 / 音频字幕</button>
+      <button class="main-tab" data-panel="image-panel" role="tab">🖼️ 图片翻译</button>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>上传，然后得到 <span class="grad">Netflix 级</span> 的双语字幕</h1>
+      <p>本地 Whisper 识别 + DeepSeek 校正与"翻译 → 反思 → 润色"，时间轴按 Netflix 字幕规范处理；还能烧录字幕、AI 配音、翻译图片里的文字。</p>
+    </section>
+
+    <!-- shared settings -->
+    <details class="card settings" id="settings" open>
+      <summary><span class="card-title">⚙️ 通用设置</span><small>DeepSeek API Key、术语表（视频和图片共用）</small></summary>
+      <div class="settings-grid">
+        <label class="field">
+          <span id="key-label">DeepSeek API Key</span>
+          <div class="input-with-btn">
+            <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" />
+            <button type="button" class="ghost small" id="toggle-key">显示</button>
+          </div>
+          <small class="hint">只保存在你的浏览器里。在 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">DeepSeek 开放平台</a> 创建。</small>
+        </label>
+        <label class="field">
+          <span>术语表（可选）</span>
+          <textarea id="terms" rows="3" placeholder="每行一条：原文=译文，例如&#10;DeepSeek=深度求索"></textarea>
+          <small class="hint">也会作为热词提示给语音识别，人名、专有名词更准。</small>
+        </label>
+      </div>
+    </details>
+
+    <!-- ================= video ================= -->
+    <div id="video-panel" class="panel">
+      <section class="card" id="upload-card">
+        <label id="dropzone" class="dropzone" for="file-input">
+          <input id="file-input" type="file" accept=".mp3,.mp4,.m4a,.wav,.flac,.ogg,.aac,.webm,.mov,.mkv,audio/*,video/*" multiple hidden />
+          <div class="drop-icon" aria-hidden="true">⬆</div>
+          <div id="drop-text" class="drop-title">点击或拖拽音频 / 视频到这里（可一次选多个，批量处理）</div>
+          <div class="hint">支持 mp3、mp4、m4a、wav、mov、mkv 等格式；多个文件会按顺序排队处理</div>
+        </label>
+
+        <div class="option-row">
+          <div class="field">
+            <span>输出字幕</span>
+            <div class="segmented" id="target-seg">
+              <button type="button" data-value="bilingual" class="active">中英双语</button>
+              <button type="button" data-value="zh">仅中文</button>
+            </div>
+            <input type="hidden" id="target" value="bilingual" />
+          </div>
+          <label class="field">
+            <span>原始语言</span>
+            <select id="language">
+              <option value="">自动检测（多国语言、混合语言）</option>
+              <option value="zh">中文</option><option value="en">英语</option><option value="ja">日语</option>
+              <option value="ko">韩语</option><option value="fr">法语</option><option value="de">德语</option>
+              <option value="es">西班牙语</option><option value="ru">俄语</option><option value="pt">葡萄牙语</option>
+              <option value="it">意大利语</option><option value="ar">阿拉伯语</option><option value="th">泰语</option>
+              <option value="vi">越南语</option><option value="id">印尼语</option><option value="ms">马来语</option>
+              <option value="hi">印地语</option><option value="tr">土耳其语</option><option value="nl">荷兰语</option>
+              <option value="pl">波兰语</option><option value="uk">乌克兰语</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="field">
+          <span>识别模型（越大越准，首次使用需下载）</span>
+          <div class="model-cards" id="model-cards">
+            <button type="button" class="model-card active" data-value="small"><b>⚡ 快速</b><small>small · 约 460 MB</small></button>
+            <button type="button" class="model-card" data-value="medium"><b>⚖️ 均衡</b><small>medium · 约 1.5 GB</small></button>
+            <button type="button" class="model-card" data-value="large-v3-turbo"><b>🎯 最准</b><small>large-v3-turbo · 约 1.6 GB</small></button>
+          </div>
+        </div>
+
+        <div class="toggles">
+          <label class="switch"><input id="correct" type="checkbox" checked /><span class="slider"></span>
+            <span><b>AI 校正识别文本</b><small>DeepSeek 结合上下文修正听错的词、同音字和标点</small></span></label>
+          <label class="switch"><input id="reflect" type="checkbox" checked /><span class="slider"></span>
+            <span><b>精翻：翻译 → 反思 → 润色</b><small>参考 VideoLingo 的三步翻译，更自然；耗时和费用约 2 倍</small></span></label>
+          <label class="switch"><input id="screen-auto" type="checkbox" checked /><span class="slider"></span>
+            <span><b>同时翻译视频画面里的文字</b><small>路牌、标题、PPT、外语硬字幕等，字幕生成后自动识别并翻译</small></span></label>
+        </div>
+
+        <button id="start-btn" class="primary big" disabled>开始生成字幕</button>
+        <p id="upload-error" class="error" hidden></p>
+      </section>
+
+      <section class="card" id="progress-card" hidden>
+        <ol class="stepper" id="stepper">
+          <li data-step="upload">上传</li>
+          <li data-step="transcribe">语音识别</li>
+          <li data-step="translate">AI 校正翻译</li>
+          <li data-step="done">完成</li>
+        </ol>
+        <div class="progress-head"><span id="stage">排队中</span><span id="percent">0%</span></div>
+        <div class="bar"><div id="bar-fill"></div></div>
+        <div class="progress-foot"><button type="button" class="ghost small" id="cancel-btn" hidden>取消</button></div>
+        <p id="job-error" class="error" hidden></p>
+      </section>
+
+      <section class="card" id="queue-card" hidden>
+        <div class="queue-head">
+          <div><span class="card-title">📋 批量队列</span> <small id="queue-count" class="hint"></small></div>
+          <div class="queue-actions">
+            <select id="batch-mode" aria-label="字幕">
+              <option value="bilingual">中英双语</option><option value="zh">中文</option>
+              <option value="en">英文</option><option value="orig">原文+中文</option>
+            </select>
+            <select id="batch-fmt" aria-label="格式">
+              <option value="srt">SRT</option><option value="vtt">VTT</option><option value="lrc">LRC</option>
+            </select>
+            <button type="button" class="ghost small" id="batch-zip">打包下载字幕</button>
+            <button type="button" class="ghost small" id="batch-burn">全部烧录</button>
+          </div>
+        </div>
+        <ol id="queue-list" class="queue-list"></ol>
+        <p id="queue-error" class="error" hidden></p>
+      </section>
+
+      <section id="result-card" class="results" hidden>
+        <div class="player-col">
+          <div class="card player-card">
+            <div class="player-wrap" id="player-wrap">
+              <video id="player" controls playsinline></video>
+              <div id="screen-overlay" class="screen-overlay" aria-hidden="true"></div>
+            </div>
+            <div class="player-meta">
+              <div class="segmented small" id="mode-toggle" role="group" aria-label="字幕显示"></div>
+              <small id="seg-count"></small>
+            </div>
+          </div>
+        </div>
+
+        <div class="tools-col card">
+          <nav class="sub-tabs" role="tablist">
+            <button class="sub-tab active" data-tab="tab-subs">📝 字幕</button>
+            <button class="sub-tab" data-tab="tab-export">⬇️ 导出</button>
+            <button class="sub-tab" data-tab="tab-burn">🔥 烧录</button>
+            <button class="sub-tab" data-tab="tab-screen">🖼️ 画面/图片文字</button>
+            <button class="sub-tab" data-tab="tab-dub">🎙️ AI 配音</button>
+            <button class="sub-tab" data-tab="tab-terms">📚 主题术语</button>
+          </nav>
+
+          <div class="tab-body" id="tab-subs">
+            <div class="table-head">
+              <small>点击时间跳转，文字可直接编辑。时间轴已按 Netflix 规范处理。</small>
+              <button id="save-btn" class="ghost small" disabled>保存修改</button>
+            </div>
+            <ol id="segments"></ol>
+            <p id="no-speech" class="hint" hidden>没有识别到语音。如果视频里有路牌、标题、外语硬字幕等文字，可以到「🖼️ 画面文字」里识别并翻译。</p>
+          </div>
+
+          <div class="tab-body" id="tab-screen" hidden>
+            <p class="hint">识别视频画面里的文字（路牌、标题、PPT、外语硬字幕……），自动跟踪出现和消失的时间并翻译；可以叠加在播放器上预览，也可以在「烧录」里替换或标注到视频中。</p>
+            <div class="dub-grid">
+              <label class="field"><span>输出</span>
+                <select id="screen-target">
+                  <option value="orig_zh">原文 + 中文</option><option value="zh">仅中文</option>
+                  <option value="zh_en">中英双语</option><option value="en">仅英文</option>
+                </select></label>
+              <label class="field"><span>画面里的语言</span><select id="screen-lang"></select></label>
+              <label class="field"><span>采样间隔</span>
+                <select id="screen-interval">
+                  <option value="0.5">每 0.5 秒（时间更准）</option>
+                  <option value="1" selected>每 1 秒（推荐）</option>
+                  <option value="2">每 2 秒（更快）</option>
+                </select></label>
+              <label class="field"><span>播放器预览</span>
+                <label class="check-inline"><input id="screen-show" type="checkbox" checked /> 在画面上显示译文</label></label>
+            </div>
+            <button id="screen-btn" class="primary">识别并翻译画面文字</button>
+            <div id="screen-progress" class="mini-progress" hidden>
+              <div class="progress-head"><span id="screen-stage">识别中</span><span id="screen-percent">0%</span></div>
+              <div class="bar"><div id="screen-fill"></div></div>
+            </div>
+            <a id="screen-download" class="download-btn" hidden>下载画面文字字幕（SRT）</a>
+            <p id="screen-error" class="error" hidden></p>
+            <ol id="screen-list" class="screen-list"></ol>
+          </div>
+
+          <div class="tab-body" id="tab-export" hidden>
+            <p class="hint">单语字幕按 Netflix 规范自动折行（英文每行 42 字符、中文每行 16 字）。"带字幕 MP3"把字幕作为歌词写进 MP3，视频会先转成 MP3。</p>
+            <table id="dl-table" class="dl-table"></table>
+          </div>
+
+          <div class="tab-body" id="tab-burn" hidden>
+            <p class="hint">把字幕直接画进画面，任何播放器、视频网站都能看到。纯音频会生成黑底视频。</p>
+            <div class="inline-form">
+              <label class="field"><span>对白字幕</span><select id="burn-mode"></select></label>
+              <label class="field"><span>画面文字</span>
+                <select id="burn-screen">
+                  <option value="">不处理</option>
+                  <option value="replace">替换原文（擦掉原文写上译文）</option>
+                  <option value="label">在原文下方标注译文</option>
+                </select></label>
+              <button id="burn-btn" class="primary">开始烧录</button>
+            </div>
+            <p id="burn-screen-hint" class="hint">处理画面文字需要先在「🖼️ 画面文字」里识别。</p>
+            <div id="burn-progress" class="mini-progress" hidden>
+              <div class="progress-head"><span id="burn-stage">烧录中</span><span id="burn-percent">0%</span></div>
+              <div class="bar"><div id="burn-fill"></div></div>
+            </div>
+            <a id="burn-download" class="download-btn" hidden>下载烧录好的视频</a>
+            <p id="burn-error" class="error" hidden></p>
+          </div>
+
+          <div class="tab-body" id="tab-dub" hidden>
+            <p class="hint">按视频里的原声自动配音：用声纹区分每个说话人（音调相近的两个人也能分开），默认克隆每个人自己的声音；也可以改用匹配的微软神经语音（调到他的音高和语速，每句跟随原句的语调起伏）；音量跟随原句；同一个人连着说的几句会一口气合成，不会在半句话中间停顿；按时间轴对齐，太长的句子自动加快语速；有人说话时原声自动静音，不说话时恢复。首次使用会自动下载约 28 MB 的声纹模型。</p>
+            <div class="dub-grid">
+              <label class="field"><span>配音语言</span><select id="dub-lang"></select></label>
+
+              <label class="field"><span>说话时保留原声 <b id="bg-value">0%</b></span>
+                <input id="dub-bg" type="range" min="0" max="100" value="0" />
+                <small class="hint">有人说话时原声静音，不说话的地方（音乐、环境声）保持原样</small></label>
+              <label class="field"><span>同时烧录字幕</span>
+                <select id="dub-burn"><option value="">不烧录</option></select></label>
+            </div>
+            <label class="field clone-field"><span>配音方式</span>
+              <select id="dub-engine">
+                <option value="clone">克隆原声（最像原声：每个人用他自己的声音说译文）</option>
+                <option value="edge">匹配微软神经语音（更快，需要联网）</option>
+              </select>
+              <small class="hint" id="engine-hint">克隆原声用 GitHub 上的开源模型 ZipVoice（免费、在本机运行，不上传）：从视频里截取每个说话人约 8 秒的原声来克隆，跨语言也可以。第一次使用会自动下载约 160 MB 模型；CPU 上大约每 1 秒配音要算 1 秒。</small></label>
+            <button id="dub-btn" class="primary">开始配音</button>
+            <div id="dub-progress" class="mini-progress" hidden>
+              <div class="progress-head"><span id="dub-stage">配音中</span><span id="dub-percent">0%</span></div>
+              <div class="bar"><div id="dub-fill"></div></div>
+            </div>
+            <a id="dub-download" class="download-btn" hidden>下载配音结果</a>
+            <table id="dub-speakers" class="terms-table dub-speakers" hidden></table>
+            <p id="dub-error" class="error" hidden></p>
+          </div>
+
+          <div class="tab-body" id="tab-terms" hidden>
+            <p id="theme" class="theme"></p>
+            <table id="terms-table" class="terms-table"></table>
+            <p id="no-terms" class="hint" hidden>没有填写 API Key 时不会提取主题和术语。</p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ================= images ================= -->
+    <div id="image-panel" class="panel" hidden>
+      <section class="card">
+        <label id="img-dropzone" class="dropzone" for="img-input">
+          <input id="img-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,image/*" multiple hidden />
+          <div class="drop-icon" aria-hidden="true">🖼️</div>
+          <div class="drop-title">点击或拖拽图片到这里（可多选）</div>
+          <div class="hint">菜单、路牌、海报、截图、漫画……识别外语文字，转成中文、英文或双语</div>
+        </label>
+        <div class="option-row">
+          <div class="field">
+            <span>输出</span>
+            <div class="segmented" id="img-target-seg">
+              <button type="button" data-value="orig_zh" class="active">原文 + 中文</button>
+              <button type="button" data-value="zh">仅中文</button>
+              <button type="button" data-value="zh_en">中英双语</button>
+              <button type="button" data-value="en">仅英文</button>
+            </div>
+          </div>
+          <label class="field"><span>图片里的语言</span><select id="ocr-lang"></select></label>
+        </div>
+        <p id="img-error" class="error" hidden></p>
+      </section>
+      <section id="img-results" class="img-results"></section>
+    </div>
+  </main>
+
+  <footer class="footer">字幕处理流程借鉴 <a href="https://github.com/Huanshere/VideoLingo" target="_blank" rel="noopener">VideoLingo</a>（Apache-2.0）</footer>
+
+  <template id="img-card-tpl">
+    <article class="card img-card">
+      <header class="img-card-head">
+        <b class="img-name"></b>
+        <span class="badge img-status">排队中</span>
+      </header>
+      <div class="bar"><div class="img-fill"></div></div>
+      <div class="img-body" hidden>
+        <div class="segmented small img-view">
+          <button type="button" data-value="translated" class="active">译图</button>
+          <button type="button" data-value="source">原图</button>
+        </div>
+        <img class="img-preview" alt="" />
+        <ol class="img-lines"></ol>
+        <div class="img-actions">
+          <a class="download-btn img-dl-png">下载图片</a>
+          <a class="download-btn ghost img-dl-txt">下载文字</a>
+        </div>
+      </div>
+      <p class="error img-error" hidden></p>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
