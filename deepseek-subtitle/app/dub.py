@@ -103,7 +103,7 @@ def voice_track(segments: list[Segment], lang: str, voice: str, duration: float,
 
     segs = sorted((s for s in segments if _text(s, lang)), key=lambda s: s.start)
     end = max([duration] + [s.end for s in segs])
-    track = np.zeros(int(end * RATE) + RATE, dtype=np.float32)
+    track = np.zeros(int(end * RATE) + 1, dtype=np.float32)
     done, lock = [0], threading.Lock()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -191,6 +191,8 @@ def dub(src: str, dst_stem: Path, segments: list[Segment], lang: str, voice: str
         mixed[: len(speech)] += speech
     else:
         mixed = speech
+    if duration:
+        mixed = mixed[: int(duration * RATE) + 1]  # the sound ends with the video
     peak = float(np.abs(mixed).max() or 1.0)
     if peak > 1.0:
         mixed /= peak  # avoid clipping where speech and original overlap

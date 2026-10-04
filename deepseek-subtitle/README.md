@@ -1,6 +1,6 @@
-# DeepSeek 中英字幕生成器
+# DeepSeek 字幕工坊
 
-上传 MP3 / MP4 等音视频文件，自动生成**中英双语字幕**或**中文字幕**，在网页中预览、编辑，并下载字幕文件、带字幕的 MP3，或把字幕烧录进视频。
+上传 MP3 / MP4 等音视频文件，自动生成 **Netflix 级时间轴**的**中英双语字幕**或**中文字幕**，在网页中预览、编辑，下载字幕文件、带字幕的 MP3，把字幕烧录进视频，或者生成 **AI 配音**；还能**翻译图片里的外语文字**。
 
 ## 工作流程
 
@@ -8,17 +8,24 @@
 
 ```
 音视频文件
-  ──► faster-whisper 本地语音识别（词级时间戳，支持多国语言）
+  ──► faster-whisper 本地语音识别（词级时间戳，支持多国语言，术语表作为热词）
   ──► 按标点和停顿重组成完整句子，过长的句子在逗号 / 停顿处拆开
   ──► DeepSeek 通读全文：总结视频主题、提取人名和专业术语
+  ──► DeepSeek 校正识别文本（听错的词、同音字、标点）
   ──► 分块翻译（每块约 600 字，带前后文、主题和术语）：直译 → 反思 → 润色
-  ──► 字幕
+  ──► 按 Netflix 字幕规范调整时间轴和折行
+  ──► 字幕 / 带字幕 MP3 / 烧录视频 / AI 配音
 ```
 
 > DeepSeek API 只支持文本，不能直接处理音频，所以先用开源的 Whisper 模型在本地把语音转成带时间轴的文字，再交给 DeepSeek 翻译。和 VideoLingo 不同，这里没有使用 WhisperX、spaCy 和 PyTorch，安装包小很多，Windows 上也容易装。
 
 ## 功能
 
+- **Netflix 级时间轴**：按 Netflix 字幕规范处理——每条至少 5/6 秒、最长 7 秒；按阅读速度（英文每秒 17 字符、中文每秒 9 字）延长显示时间；相邻字幕至少间隔 2 帧，小于 0.5 秒的空隙收拢成 2 帧；时间对齐到视频帧；单语字幕自动折行（英文每行 42 字符、中文每行 16 字，最多两行，上短下长）
+- **识别更准确**：可选识别模型（快速 small / 均衡 medium / 最准 large-v3-turbo）；术语表作为热词提示给 Whisper；关闭"沿用上文"避免 Whisper 重复和幻听；DeepSeek 结合上下文校正识别文本
+- **AI 配音**：用微软 Edge 神经语音（免费、无需 Key，多种中英文音色）朗读翻译后的字幕，按时间轴对齐，太长的句子自动加快语速；原声可作为背景音保留（音量可调）；视频画面原样保留（不重新编码），纯音频输出 MP3，也可以同时烧录字幕
+- **图片翻译**：上传菜单、路牌、海报、截图等图片（可多张），本地 OCR（RapidOCR / PaddleOCR 模型）识别文字，DeepSeek 校正、翻译成中文 / 英文 / 原文 + 中文 / 中英双语，并生成译图：单语模式把原文擦掉、按原文颜色写上译文，双语模式在原文下方标注译文。默认支持中文、英文、日文，韩文、法德西意葡等拉丁字母语言、俄文、泰文、希腊文、阿拉伯文、印地文首次使用时自动下载模型
+- **精美界面**：分步进度、播放器与编辑并排、功能分页、深色模式、手机适配
 - **断句更自然**：不再沿用 Whisper 随意切分的片段，而是根据词级时间戳重组成完整句子，长句在逗号或停顿处拆开
 - **精翻（翻译 → 反思 → 润色）**：参考 VideoLingo 的三步翻译，先忠实直译，再逐句反思并改写成自然的表达；可在页面上关掉以节省时间和费用
 - **主题与术语**：翻译前先让 DeepSeek 总结视频主题、提取人名和专业术语，保证全片译名一致；也可以在页面上填写自己的术语表（如 `DeepSeek=深度求索`），优先使用
@@ -79,7 +86,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 | `DEEPSEEK_API_KEY` | – | DeepSeek API Key；不配置时需在网页中填写（"仅中文"模式可不填） |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 翻译用的模型 |
-| `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`，越大越准越慢 |
+| `WHISPER_MODEL` | `small` | 默认识别模型（网页上可按任务选择 small / medium / large-v3-turbo） |
 | `WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto`。用 NVIDIA 显卡加速需另装 CUDA 12 和 cuDNN 9，GPU 出错时会自动退回 CPU |
 | `MAX_UPLOAD_MB` | `500` | 上传大小上限 |
 | `SUBTITLE_FONT` | 自动查找 | 烧录字幕用的字体文件路径，例如 `C:/Windows/Fonts/simhei.ttf` |
@@ -88,13 +95,18 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/jobs` | 上传文件（表单字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`、`reflect=1/0`（精翻）、`terms`（术语表，每行 `原文=译文`）），返回任务 `id` |
+| `POST` | `/api/jobs` | 上传文件（表单字段 `file`；可选 `target=bilingual/zh`、`language`、`api_key`、`model`、`reflect=1/0`（精翻）、`correct=1/0`（AI 校正）、`terms`（术语表，每行 `原文=译文`）），返回任务 `id` |
 | `GET` | `/api/jobs/{id}` | 查询进度与字幕内容 |
 | `PUT` | `/api/jobs/{id}/segments` | 保存编辑后的字幕 |
 | `GET` | `/api/jobs/{id}/subtitle.srt`、`.vtt` 或 `.lrc`，参数 `mode=bilingual/zh/en/orig` | 获取字幕文件（加 `&download=true` 下载） |
 | `GET` | `/api/jobs/{id}/export.mp3?mode=...` | 下载带字幕（ID3 歌词）的 MP3 |
 | `POST` | `/api/jobs/{id}/burn`，JSON `{"mode": "bilingual"}` | 开始把字幕烧录进视频；进度在任务详情的 `burn` 字段 |
 | `GET` | `/api/jobs/{id}/burned.mp4` | 下载烧录好的视频 |
+| `GET` | `/api/voices` | 配音音色列表 |
+| `POST` | `/api/jobs/{id}/dub`，JSON `{"lang": "zh", "voice": "...", "bg_volume": 0.2, "burn_mode": null}` | 开始 AI 配音；进度在任务详情的 `dub` 字段 |
+| `GET` | `/api/jobs/{id}/dubbed` | 下载配音结果（MP4 或 MP3） |
+| `POST` | `/api/images`（表单 `file`、`target=zh/en/orig_zh/zh_en`、`ocr_lang`、`api_key`、`terms`） | 翻译图片里的文字，返回 `id` |
+| `GET` | `/api/images/{id}`、`/translated.png`、`/text.txt`、`/source` | 查询结果、下载译图 / 文字、原图 |
 | `GET` | `/api/jobs/{id}/media` | 原始音视频 |
 
 ## 项目结构
@@ -104,11 +116,14 @@ app/
   main.py         FastAPI 服务、任务队列、接口
   transcriber.py  音频解码、faster-whisper 语音识别（GPU 出错自动退回 CPU）
   segmenter.py    用词级时间戳重组句子、拆分长句（借鉴 VideoLingo）
+  timing.py       Netflix 字幕规范：时长、阅读速度、间隔、帧对齐、折行
   translator.py   DeepSeek 总结术语、分块两步翻译、中文校对（借鉴 VideoLingo）
   subtitles.py    SRT / VTT / LRC 生成
   export.py       导出带字幕（ID3 歌词）的 MP3
   burn.py         把字幕烧录进视频（PyAV 解码 / 编码 + Pillow 绘制字幕）
-  media.py        音频重新编码（烧录和导出 MP3 共用）
+  media.py        音频重新编码（烧录、导出、配音共用）
+  dub.py          AI 配音（edge-tts，借鉴 VideoLingo 的配音流程）
+  image_translate.py  图片翻译（RapidOCR 识别 + DeepSeek 翻译 + 绘制译图）
 static/           网页界面（原生 HTML/CSS/JS）
 tests/            单元测试（pytest）
 启动.bat          Windows 一键启动
@@ -119,5 +134,6 @@ start.sh          macOS / Linux 一键启动
 ## 说明
 
 - 任务保存在内存中，服务重启后历史任务会丢失；上传的文件保存在 `data/uploads/`。
+- AI 配音需要能访问微软 Edge 语音服务（speech.platform.bing.com）；图片翻译首次使用韩文等语言时需要从 ModelScope 下载识别模型。
 - 为避免占满 CPU/GPU，同一时间只处理一个任务，其余排队。
 - 浏览器能否播放视频取决于编码格式（如 H.265 的 mp4 部分浏览器不支持），但不影响字幕生成和下载。

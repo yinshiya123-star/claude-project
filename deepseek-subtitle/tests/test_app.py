@@ -205,7 +205,7 @@ def test_full_job_flow(monkeypatch, tmp_path):
     assert "您好\nHello" in srt.text
     assert "attachment" in srt.headers["content-disposition"]
     assert client.get(f"/api/jobs/{job_id}/media").content == b"fake-audio"
-    assert "中英字幕生成器" in client.get("/").text
+    assert "DeepSeek 字幕工坊" in client.get("/").text
 
 
 def test_decode_audio(tmp_path):
@@ -603,6 +603,7 @@ def test_dub_video_keeps_picture_and_fits_speech(monkeypatch, tmp_path):
         assert c.streams.video[0].codec_context.name == "h264"
         assert c.streams.video[0].frames == s.streams.video[0].frames  # picture copied, not re-encoded
         assert c.streams.audio
+        assert abs(float(c.duration / av.time_base) - 6.0) < 0.2  # sound no longer than the video
     from app.transcriber import decode_audio
 
     audio = decode_audio(str(out), 16000)
