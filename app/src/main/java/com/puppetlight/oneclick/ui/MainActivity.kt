@@ -30,6 +30,7 @@ import com.puppetlight.oneclick.data.MediaHelper
 import com.puppetlight.oneclick.data.ScriptRepository
 import com.puppetlight.oneclick.data.Settings as AppSettings
 import com.puppetlight.oneclick.engine.RunState
+import com.puppetlight.oneclick.service.KeepAliveService
 import com.puppetlight.oneclick.service.ProjectionService
 import com.puppetlight.oneclick.service.PuppetAccessibilityService
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +110,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         renderStatus()
+        checkInterrupted()
         tvSummary.text = "光源 ${settings.lightColor} · 关键帧 ${settings.keyframeTime}s · 摇晃 ${"%.2f".format(settings.shakeStrength)}" +
             (if (settings.saturationEnabled) " · 饱和度渐变" else "")
     }
@@ -237,6 +239,31 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /** 上次制作没有正常结束 → 进程被系统清理了，告诉用户原因和解决办法。 */
+    private fun checkInterrupted() {
+        if (PuppetAccessibilityService.instance?.isRunning == true) return
+        if (!RunState.consumeInterrupted(this)) return
+        val last = RunState.loadLastLog(this).lines().lastOrNull { it.contains("▶") }
+            ?.substringAfter("▶")?.trim() ?: "开始阶段"
+        AlertDialog.Builder(this)
+            .setTitle("上次制作被系统中断了")
+            .setMessage(
+                "停在：$last\n\n" +
+                    "这通常是手机的省电/后台清理把 App 关掉了，悬浮窗也会跟着消失。请在「一键木偶打光」的 应用信息 里：\n\n" +
+                    "1. 省电策略 → 无限制\n" +
+                    "2. 自启动 → 打开\n" +
+                    "3. 其他权限 → 后台弹出界面、显示悬浮窗 → 允许\n" +
+                    "4. 在最近任务里把本 App 加锁，不要上滑清理\n\n" +
+                    "然后把无障碍开关关掉再重新打开，再试一次。"
+            )
+            .setPositiveButton("去应用信息") { _, _ ->
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            }
+            .setNeutralButton("看日志") { _, _ -> showLog(this) }
+            .setNegativeButton("知道了", null)
+            .show()
+    }
+
     private fun isXiaomi() = Build.MANUFACTURER.lowercase().let { it.contains("xiaomi") || it.contains("redmi") }
 
     private fun openAccessibilitySettings() {
@@ -317,6 +344,7 @@ class MainActivity : AppCompatActivity() {
         }
         val vars = buildVars()
         if (service.startRun(script, vars)) {
+            KeepAliveService.start(this)
             RunState.log("参数：${vars.filterKeys { !it.endsWith("Uri") }}")
             Toast.makeText(this, "开始自动制作，请勿触碰屏幕", Toast.LENGTH_LONG).show()
         }

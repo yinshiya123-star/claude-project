@@ -79,6 +79,7 @@ class PuppetAccessibilityService : AccessibilityService() {
         if (isRunning) return false
         stopRecording(save = false)
         RunState.clearLog()
+        RunState.beginRun(this)
         RunState.update { RunState.Snapshot(status = RunState.Status.RUNNING) }
         overlay?.dismiss()
         val ov = RunOverlay(this)
@@ -86,6 +87,7 @@ class PuppetAccessibilityService : AccessibilityService() {
             ov.show()
         } catch (ex: Exception) {
             Toast.makeText(this, "无法显示悬浮窗，请开启悬浮窗权限：${ex.message}", Toast.LENGTH_LONG).show()
+            RunState.endRun(this)
             return false
         }
         overlay = ov
@@ -106,18 +108,11 @@ class PuppetAccessibilityService : AccessibilityService() {
                 RunState.log("异常终止：$ex")
             } finally {
                 withContext(NonCancellable) {
-                    RunState.saveLog(this@PuppetAccessibilityService)
+                    RunState.endRun(this@PuppetAccessibilityService)
                     ProjectionService.stop(this@PuppetAccessibilityService)
+                    KeepAliveService.stop(this@PuppetAccessibilityService)
                     engine = null
-                    if (!success) {
-                        // 停止后悬浮窗保留几秒钟显示状态
-                        delay(4000)
-                        withContext(Dispatchers.Main) {
-                            if (overlay === ov) {
-                                ov.dismiss(); overlay = null
-                            }
-                        }
-                    }
+                    // 悬浮窗保留，显示结果/停止原因，由用户点「关闭」
                 }
             }
         }

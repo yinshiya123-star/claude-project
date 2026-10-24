@@ -15,6 +15,8 @@
     <!-- Android 8~10 截图检测用（录屏授权） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- 制作期间保持进程存活（防止被 MIUI 等系统清理） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- 检测 NV MAX / Motion Ninja 是否已安装（Android 11+ 包可见性） -->
     <queries>
@@ -69,6 +71,15 @@
             android:name=".service.ProjectionService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <service
+            android:name=".service.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the accessibility automation alive while a video is being produced" />
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"
