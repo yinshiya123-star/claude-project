@@ -1,0 +1,12 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- 光束 -->
+    <path android:fillColor="#55FFB347" android:pathData="M54,22 L80,86 L28,86 Z" />
+    <!-- 灯 -->
+    <path android:fillColor="#FFFF8A1F" android:pathData="M46,18h16v8h-16z" />
+    <!-- 木偶线 -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:pathData="M38,30 L48,52 M70,30 L60,52 M54,26 L54,40" />
+    <!-- 木偶 -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,40a5,5 0,1 1,0 10a5,5 0,1 1,0 -10zM47,52h14l3,14h-4v14h-4v-11h-4v11h-4v-14h-4z" />
+</vector>

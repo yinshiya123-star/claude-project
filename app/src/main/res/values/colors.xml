@@ -1,0 +1,9 @@
+<resources>
+    <color name="brand">#FF8A1F</color>
+    <color name="brand_dark">#C25E00</color>
+    <color name="ok">#2E9E5B</color>
+    <color name="bad">#D64545</color>
+    <color name="overlay_bg">#E6181C24</color>
+    <color name="overlay_btn">#33FFFFFF</color>
+    <color name="ic_bg">#1E2230</color>
+</resources>

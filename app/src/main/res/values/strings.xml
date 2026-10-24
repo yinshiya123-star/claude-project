@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">一键木偶打光</string>
+    <string name="a11y_label">一键木偶打光 · 自动操作</string>
+    <string name="a11y_description">开启后，「一键木偶打光」会按照步骤脚本自动点击、滑动、输入，替你操作 NV MAX 和 Motion Ninja 完成视频制作；录制模式下会记录你点击的控件和坐标以生成脚本。本服务不会收集或上传任何个人信息。</string>
+</resources>
