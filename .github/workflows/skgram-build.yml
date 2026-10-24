@@ -1,7 +1,7 @@
 # SKGram 全平台构建（被 skgram.yml 和 skgram-release.yml 调用）：
 # Android APK、Windows EXE/MSI、macOS DMG（Apple 芯片 + Intel）、Linux AppImage/DEB。
 # 可选仓库 Secrets：
-#   TG_API_ID / TG_API_HASH      预置 Telegram API 凭据（只用于 Android 构建；不填则首次启动时在应用里输入）
+#   TG_API_ID / TG_API_HASH      预置 Telegram API 凭据（所有平台；配置后用户无需自己去 my.telegram.org 申请）
 #   SKGRAM_KEYSTORE_BASE64       Android release 签名密钥库（base64），配合下面三个
 #   SKGRAM_KEYSTORE_PASSWORD / SKGRAM_KEY_ALIAS / SKGRAM_KEY_PASSWORD
 #   不配置签名时 APK 用 debug 密钥签名，可以直接安装。
@@ -90,6 +90,9 @@ jobs:
           curl -sSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x "$RUNNER_TEMP/appimagetool"
       - name: Package
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: ./gradlew ${{ matrix.tasks }}
       - name: Collect
         run: |

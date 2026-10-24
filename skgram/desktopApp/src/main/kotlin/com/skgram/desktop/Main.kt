@@ -31,8 +31,12 @@ import com.skgram.ui.SkgramApp
 
 fun main() {
     AppInfo.version = System.getProperty("skgram.version") ?: "dev"
-    System.getenv("TG_API_ID")?.toIntOrNull()?.let { Prefs.builtInApiId = it }
-    System.getenv("TG_API_HASH")?.let { Prefs.builtInApiHash = it }
+    // Credentials baked in at build time; environment variables override them.
+    val build = java.util.Properties().apply {
+        Thread.currentThread().contextClassLoader.getResourceAsStream("skgram-build.properties")?.use { load(it) }
+    }
+    (System.getenv("TG_API_ID") ?: build.getProperty("tg.api.id"))?.toIntOrNull()?.let { Prefs.builtInApiId = it }
+    (System.getenv("TG_API_HASH") ?: build.getProperty("tg.api.hash"))?.takeIf { it.isNotBlank() }?.let { Prefs.builtInApiHash = it }
     Prefs.load()
     Accounts.start()
 

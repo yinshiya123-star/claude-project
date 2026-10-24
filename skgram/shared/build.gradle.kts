@@ -30,11 +30,13 @@ kotlin {
             implementation("androidx.core:core-ktx:1.18.0")
             implementation("androidx.media3:media3-exoplayer:1.11.1")
             implementation("androidx.media3:media3-ui:1.11.1")
+            implementation("io.github.pytgcalls:ntgcalls:3.0.5")
         }
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.common)
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
+                implementation("net.java.dev.jna:jna:5.17.0")
             }
         }
     }

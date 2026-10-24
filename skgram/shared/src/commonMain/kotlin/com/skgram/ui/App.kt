@@ -10,11 +10,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -33,11 +30,10 @@ import com.skgram.core.Account
 import com.skgram.core.Accounts
 import com.skgram.core.Platform
 import com.skgram.core.Prefs
-import com.skgram.core.displayName
 import com.skgram.i18n.Lang
 import com.skgram.i18n.LocalStrings
-import com.skgram.i18n.fmt
 import com.skgram.ui.screens.AuthFlow
+import com.skgram.ui.screens.CallOverlay
 import com.skgram.ui.screens.ChatListScreen
 import com.skgram.ui.screens.ChatScreen
 import com.skgram.ui.screens.NewChatScreen
@@ -86,7 +82,7 @@ fun SkgramApp() {
                     CompositionLocalProvider(LocalAccount provides acc) { AccountRoot(acc) }
                 }
                 ToastHost(Modifier.align(Alignment.BottomCenter))
-                accounts.forEach { IncomingCall(it) }
+                accounts.forEach { CallOverlay(it) }
             }
         }
     }
@@ -131,20 +127,4 @@ private fun ToastHost(modifier: Modifier) {
     val host = remember { SnackbarHostState() }
     LaunchedEffect(Unit) { Toaster.messages.collect { host.showSnackbar(it) } }
     SnackbarHost(host, modifier.navigationBarsPadding().padding(bottom = 72.dp))
-}
-
-/** Calls can't be answered here (no call engine yet), but the user can see them and decline. */
-@Composable
-private fun IncomingCall(acc: Account) {
-    val call by acc.incomingCall.collectAsState()
-    val c = call ?: return
-    val s = LocalStrings.current
-    var name by remember(c.id) { mutableStateOf("") }
-    LaunchedEffect(c.id) { name = acc.user(c.userId)?.displayName() ?: "" }
-    AlertDialog(
-        onDismissRequest = {},
-        title = { Text(s.incomingCall.fmt(name)) },
-        text = { Text(s.callsUnsupported) },
-        confirmButton = { TextButton(onClick = { acc.declineCall(c) }) { Text(s.decline) } },
-    )
 }

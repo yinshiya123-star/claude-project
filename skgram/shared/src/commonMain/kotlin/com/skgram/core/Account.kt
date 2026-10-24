@@ -28,6 +28,7 @@ import dev.g000sha256.tdl.dto.SecretChat
 import dev.g000sha256.tdl.dto.UpdateActiveNotifications
 import dev.g000sha256.tdl.dto.UpdateAuthorizationState
 import dev.g000sha256.tdl.dto.UpdateCall
+import dev.g000sha256.tdl.dto.UpdateNewCallSignalingData
 import dev.g000sha256.tdl.dto.UpdateChatLastMessage
 import dev.g000sha256.tdl.dto.UpdateChatPhoto
 import dev.g000sha256.tdl.dto.UpdateChatPosition
@@ -126,8 +127,6 @@ class Account(val id: Int, private val dbDir: String, private val filesDir: Stri
     private val _version = MutableStateFlow(0L)
     /** Bumps when users or secret chats change, so names and states get re-read. */
     val version: StateFlow<Long> = _version
-    private val _incomingCall = MutableStateFlow<Call?>(null)
-    val incomingCall: StateFlow<Call?> = _incomingCall
 
     private val notificationLines = HashMap<Int, LinkedHashMap<Int, String>>()
 
@@ -164,6 +163,7 @@ class Account(val id: Int, private val dbDir: String, private val filesDir: Stri
                     is UpdateNotificationGroup -> onNotificationGroup(u)
                     is UpdateActiveNotifications -> u.groups.forEach(::onActiveGroup)
                     is UpdateCall -> onCall(u.call)
+                    is UpdateNewCallSignalingData -> calls.onSignalingData(u.callId, u.data)
                     else -> Unit
                 }
             }
@@ -283,23 +283,20 @@ class Account(val id: Int, private val dbDir: String, private val filesDir: Stri
 
     // --- calls ---------------------------------------------------------------------------
 
+    val calls = CallManager(this)
+
     private fun onCall(call: Call) {
+        calls.onCall(call)
+        // Ring through the system when SKGram isn't on screen; tapping it brings the call up.
         val key = (id shl 22) xor 0x3FFFFF
         if (!call.isOutgoing && call.state is CallStatePending) {
-            _incomingCall.value = call
-            if (Prefs.notifications.value) scope.launch {
+            if (Prefs.notifications.value && !AppState.foreground) scope.launch {
                 val name = user(call.userId)?.displayName() ?: ""
                 Platform.notify(ChatNotification(key, id, call.userId, "SKGram", listOf(I18n.strings.incomingCall.format(name))))
             }
-        } else if (_incomingCall.value?.id == call.id) {
-            _incomingCall.value = null
+        } else {
             Platform.cancelNotification(key)
         }
-    }
-
-    fun declineCall(call: Call) {
-        _incomingCall.value = null
-        scope.launch { client.discardCall(call.id, false, "", 0, false, 0) }
     }
 }
 

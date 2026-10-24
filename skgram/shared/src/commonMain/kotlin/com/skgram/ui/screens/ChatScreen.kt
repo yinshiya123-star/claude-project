@@ -85,6 +85,7 @@ import com.skgram.core.getOrNull
 import com.skgram.core.getOrThrow
 import com.skgram.core.preview
 import com.skgram.core.rememberFilePicker
+import com.skgram.core.rememberMicPermission
 import com.skgram.core.rememberVoiceRecorder
 import com.skgram.core.sameDay
 import com.skgram.core.senderKey
@@ -274,6 +275,7 @@ fun ChatScreen(chatId: Long, onBack: () -> Unit) {
         if (listState.firstVisibleItemIndex <= 2) listState.animateScrollToItem(0)
     }
 
+    val askMic = rememberMicPermission()
     val pick = rememberFilePicker { files ->
         val caption = input.trim()
         input = ""
@@ -302,6 +304,14 @@ fun ChatScreen(chatId: Long, onBack: () -> Unit) {
                         IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) }
                         if (chat != null) Avatar(chat.id, chat.title, chat.photo, size = 38.dp)
                         Spacer(Modifier.width(8.dp))
+                    }
+                },
+                actions = {
+                    val peer = (chat?.type as? ChatTypePrivate)?.userId
+                    if (peer != null && peer != account.me.value?.id) {
+                        IconButton(onClick = {
+                            askMic { granted -> if (granted) account.calls.startCall(peer) else Toaster.show(s.micDenied) }
+                        }) { Icon(Icons.Filled.Phone, s.callAction, tint = Color.White) }
                     }
                 },
             )

@@ -152,6 +152,7 @@ private fun ApiSetupScreen() {
             }
         }
         TextButton(onClick = { uri.openUri("https://my.telegram.org/apps") }) { Text(s.setupOpenSite) }
+        Text(s.setupHelp, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
     }
 }
 

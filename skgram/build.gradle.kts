@@ -9,8 +9,8 @@ plugins {
 }
 
 /** Single source of truth for the app version (Android, Windows, macOS, Linux). */
-extra["skgramVersion"] = "1.1.0"
-extra["skgramVersionCode"] = 2
+extra["skgramVersion"] = "1.2.0"
+extra["skgramVersionCode"] = 3
 
 tasks.register("printVersion") {
     val v = project.extra["skgramVersion"]

@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- The call library asks for the camera too; SKGram only makes voice calls. -->
+    <uses-permission android:name="android.permission.CAMERA" tools:node="remove" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -7,12 +11,19 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application>
         <service
             android:name="com.skgram.core.SyncService"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging" />
+
+        <service
+            android:name="com.skgram.core.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
