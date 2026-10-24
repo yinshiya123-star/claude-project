@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="0" android:startY="0" android:endX="108" android:endY="108"
+                android:startColor="#FF128AFA" android:endColor="#FF4FD0F7" />
+        </aapt:attr>
+    </path>
+    <!-- slanted stripes -->
+    <path android:fillColor="#1AFFFFFF" android:pathData="M-10,108 L20,108 L80,0 L50,0 Z" />
+    <path android:fillColor="#12FFFFFF" android:pathData="M40,108 L56,108 L116,0 L100,0 Z" />
+</vector>
