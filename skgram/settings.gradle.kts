@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "SKGram"
-include(":app")
+include(":shared", ":androidApp", ":desktopApp")

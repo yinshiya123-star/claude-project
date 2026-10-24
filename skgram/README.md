@@ -1,54 +1,76 @@
 # SKGram
 
-基于 TDLib（Telegram 官方客户端库）的第三方 Telegram 安卓客户端，界面采用蔚蓝档案风格的原创设计：晴空蓝渐变、光环徽记、斜切按钮与条纹背景（未使用任何游戏原画或素材）。
+基于 TDLib（Telegram 官方客户端库）的第三方 Telegram 客户端，支持 **Android、Windows、macOS、Linux**。界面采用蔚蓝档案风格的原创设计：晴空蓝渐变、光环徽记、斜切按钮与条纹背景（未使用任何游戏原画或素材）。
+
+## 下载
+
+在 GitHub Releases 页面下载：
+
+| 设备 | 文件 |
+|---|---|
+| 安卓手机（大多数） | `SKGram-*-android-arm64-v8a.apk` |
+| 安卓老手机 | `SKGram-*-android-armeabi-v7a.apk` |
+| 不确定 | `SKGram-*-android-universal.apk` |
+| Windows | `SKGram-*-windows-x64.exe` 或 `.msi` |
+| Mac（Apple 芯片） | `SKGram-*-macos-arm64.dmg` |
+| Mac（Intel） | `SKGram-*-macos-x64.dmg` |
+| Linux | `SKGram-*-x86_64.AppImage` 或 `.deb` |
+
+首次启动需要填写 Telegram API ID 和 API Hash：登录 <https://my.telegram.org> → API development tools → 创建应用即可获得。
+
+macOS 包没有 Apple 签名，第一次打开请在「访达」里右键 →「打开」。Windows 若弹出 SmartScreen，点「更多信息」→「仍要运行」。
 
 ## 功能
 
-- 登录：手机号 → 验证码 → 两步验证密码 → 邮箱验证（Telegram 要求时）
-- 聊天列表：置顶、未读数、@提及、已读回执（✓/✓✓）、长按置顶/标为已读/复制 ID
-- 快捷分类：全部 / 未读 / 私聊 / 群组 / 频道（不用手动建文件夹），聊天搜索
-- 聊天：文字、图片、贴纸、视频/GIF 封面、文件、语音；回复、复制、删除、日期分隔
-- **SKGram 增强**（官方客户端没有）：
-  - 幽灵模式：不发送已读回执、不显示在线
-  - 一键翻译消息（翻译成当前界面语言）
-  - +1 复读
-  - 双击消息快速回复
-  - 显示聊天 / 用户 / 消息 ID
-  - 媒体加载时立即显示模糊预览
-- 语言：简体中文、繁體中文、한국어、日本語、English（设置里切换，或跟随系统）
+- 登录：手机号 → 验证码 → 两步验证 → 邮箱验证（Telegram 要求时）
+- **多账号**：可同时登录多个账号，全部在线收消息；点标题或在设置里切换
+- 聊天列表：置顶、未读、@提及、已读回执，快捷分类（全部 / 未读 / 私聊 / 群组 / 频道 / 私密）
+- 聊天：文字、图片、贴纸、视频、GIF、语音、音频、文件、通话记录；回复、复制、删除
+- **发送图片、视频、文件**；安卓上可**录制并发送语音**（Android 10+）
+- **播放**：安卓内置视频播放器和语音/音频播放；桌面版用系统默认播放器打开
+- **私密聊天**（端到端加密），新建聊天页可从联系人发起
+- **搜索并加入公开群组和频道**
+- **通知**：遵循每个聊天的免打扰设置；安卓可选「后台保持连接」以即时收到消息；桌面版用系统托盘通知
+- SKGram 增强：幽灵模式（不发已读、不显示在线）、一键翻译、+1 复读、双击回复、显示 ID、媒体加载时即时模糊预览
+- 语言：简体中文、繁體中文、한국어、日本語、English
 - 主题：学园晴空、学园夜幕、樱花、跟随系统
 
-## 速度相关的取舍
+## 还没有
 
-- 核心是 TDLib 原生库，开启本地消息/聊天数据库：重开应用时聊天列表直接从本地读出
-- 应用启动时就初始化 TDLib，界面出现时数据已在加载
-- 聊天列表在大量更新涌入时最多每 80ms 重排一次，不会卡顿
-- 图片按显示尺寸降采样解码并缓存；release 包开启 R8 压缩优化
-- 按 CPU 架构分包，arm64 包约 24MB
+- **语音/视频通话**：需要 Telegram 的 WebRTC 通话引擎（tgcalls），目前没有内置。来电会显示并可拒绝，请在其他设备接听。
+- 推送不走 Google FCM（第三方客户端拿不到 Telegram 的推送通道），安卓靠「后台保持连接」实现即时通知。
+- 桌面版录音。
 
-## 安装
+## 项目结构
 
-大多数手机装 `SKGram-arm64-v8a.apk`；老手机装 `armeabi-v7a`；不确定就装 `universal`。需要 Android 8.0 及以上。
-
-首次启动需要填写 Telegram API ID 和 API Hash：登录 <https://my.telegram.org> → API development tools → 创建应用即可获得。也可以构建时预置（见下）。
+```
+shared/       Kotlin Multiplatform：全部界面和逻辑（Compose Multiplatform）
+  commonMain/   两端共用
+  androidMain/  通知、后台服务、ExoPlayer、选图、录音
+  desktopMain/  托盘通知、文件对话框、系统播放器
+androidApp/   安卓应用外壳
+desktopApp/   桌面应用外壳 + 安装包配置
+tools/
+  strings.py        五种语言的界面文字表（改完运行它生成 Strings.kt）
+  icons.py          生成桌面图标
+  make-appimage.sh  把 Linux 程序打包成单个 AppImage
+```
 
 ## 构建
 
-需要 JDK 17+ 和 Android SDK（platform `android-37.0`）。
+需要 JDK 17+；安卓还需要 Android SDK（platform `android-37.0`）。版本号在根目录 `build.gradle.kts` 里统一设置。
 
 ```bash
-cd skgram
-# 可选：预置 API 凭据，写进 local.properties（不会提交）
-echo "tg.api.id=123456" >> local.properties
-echo "tg.api.hash=0123456789abcdef0123456789abcdef" >> local.properties
-./gradlew :app:assembleRelease
-# 输出在 app/build/outputs/apk/release/
+./gradlew :androidApp:assembleRelease      # APK → androidApp/build/outputs/apk/release/
+./gradlew :desktopApp:run                  # 直接运行桌面版
+./gradlew :desktopApp:packageExe           # Windows（需在 Windows 上）
+./gradlew :desktopApp:packageDmg           # macOS（需在 Mac 上）
+./gradlew :desktopApp:packageAppImage && tools/make-appimage.sh 1.1.0   # Linux
 ```
 
-没配置签名密钥时 release 包用 debug 密钥签名，可以直接安装。正式发布请在 `local.properties` 或环境变量里配置 `skgram.keystore`、`skgram.keystore.password`、`skgram.key.alias`、`skgram.key.password`。
+安装包只能在对应系统上构建，所以 GitHub Actions 会在 Windows、macOS、Linux 三种机器上分别构建：
 
-GitHub Actions 工作流 `.github/workflows/skgram.yml` 会自动构建 APK；手动运行并填写版本号会发布到 Releases。
+- 推送 `skgram/` 的改动：构建全部安装包，作为 Artifacts 上传
+- 推送 `skgram-v*` 标签（如 `skgram-v1.1.0`）：构建并发布到 Releases
 
-## 目前还没有
-
-推送通知、发送图片/文件、语音播放、视频播放、通话、秘密聊天、多账号。
+可选：在 `local.properties` 或仓库 Secrets 里预置 `tg.api.id` / `tg.api.hash`（`TG_API_ID` / `TG_API_HASH`）；配置 `skgram.keystore` 等签名参数（见 `.github/workflows/skgram-build.yml`）。没配签名时 APK 用 debug 密钥签名，可以直接安装，但不同机器构建的版本不能互相覆盖安装。

@@ -1,0 +1,16 @@
+# 推送 skgram-v* 标签（例如 skgram-v1.1.0）：构建全平台安装包并发布到 Releases。
+name: SKGram release
+
+on:
+  push:
+    tags: ["skgram-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/skgram-build.yml
+    secrets: inherit
+    with:
+      release: true
