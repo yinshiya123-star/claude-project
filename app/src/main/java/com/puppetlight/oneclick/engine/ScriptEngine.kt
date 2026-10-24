@@ -575,13 +575,39 @@ class ScriptEngine(
             ?: throw StepFailure("未安装：$pkg")
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (o.optBoolean("freshStart", false)) intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        val label = runCatching {
+            service.packageManager.getApplicationLabel(service.packageManager.getApplicationInfo(pkg, 0)).toString()
+        }.getOrDefault(pkg)
         withContext(Dispatchers.Main) { service.startActivity(intent) }
-        status("等待 $pkg 打开…")
-        val deadline = System.currentTimeMillis() + num(o, "timeoutMs", 15000.0).toLong()
+        status("等待 $label 打开…")
+        if (waitForeground(pkg, 6000)) return
+
+        // MIUI/HyperOS 等系统会拦截「后台弹出界面」：回到桌面，像人一样点 App 图标
+        RunState.log("  系统拦截了后台打开 $label，改为从桌面点击图标")
+        status("从桌面点击「$label」图标…")
+        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+        sleep(1500)
+        val icon = finder.waitFind(Target(texts = listOf(label), exact = true, scroll = true), 3000)
+        if (icon != null) {
+            val c = finder.clickableAncestor(icon)
+            if (c?.performAction(AccessibilityNodeInfo.ACTION_CLICK) != true) {
+                val b = finder.bounds(icon)
+                gestures.tap(b.exactCenterX(), b.exactCenterY())
+            }
+            if (waitForeground(pkg, num(o, "timeoutMs", 15000.0).toLong())) return
+        }
+        throw StepFailure(
+            "无法打开「$label」。请在 一键木偶打光 的 应用信息 → 其他权限 中允许「后台弹出界面」，" +
+                "或把「$label」图标放到桌面第一页后点重试"
+        )
+    }
+
+    private suspend fun waitForeground(pkg: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (finder.packageOnScreen(pkg)) return
+            if (finder.packageOnScreen(pkg)) return true
             sleep(400)
         }
-        throw StepFailure("$pkg 没有出现在前台")
+        return false
     }
 }

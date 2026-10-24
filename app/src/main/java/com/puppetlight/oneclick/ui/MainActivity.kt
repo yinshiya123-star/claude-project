@@ -221,7 +221,9 @@ class MainActivity : AppCompatActivity() {
                 "首次使用需要开启两项权限：\n\n" +
                     "1. 无障碍服务（必需）\n在「无障碍 → 已下载的应用 / 已安装的服务」中找到「一键木偶打光 · 自动操作」并开启。它用来替你点击、滑动 NV MAX 和 Motion Ninja。\n\n" +
                     "2. 悬浮窗权限（推荐）\n运行时显示进度悬浮窗，可随时暂停/停止。\n\n" +
-                    "另外请确认已安装 NV MAX 和 Motion Ninja。"
+                    "另外请确认已安装 NV MAX 和 Motion Ninja。" +
+                    (if (isXiaomi()) "\n\n小米/红米用户：请在 应用信息 → 其他权限 中允许「后台弹出界面」，" +
+                        "并把省电策略设为「无限制」，否则制作时可能无法自动打开 NV MAX。" else "")
             )
             .setPositiveButton("去开启无障碍") { _, _ ->
                 settings.guideShown = true
@@ -234,6 +236,8 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("稍后") { _, _ -> settings.guideShown = true }
             .show()
     }
+
+    private fun isXiaomi() = Build.MANUFACTURER.lowercase().let { it.contains("xiaomi") || it.contains("redmi") }
 
     private fun openAccessibilitySettings() {
         Toast.makeText(this, "找到「一键木偶打光 · 自动操作」并开启", Toast.LENGTH_LONG).show()
