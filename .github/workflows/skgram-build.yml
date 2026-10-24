@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       release:
-        description: "Publish the files to a GitHub release named after the current tag"
+        description: "Publish a GitHub release skgram-v<version> (version from skgram/build.gradle.kts) unless it already exists"
         type: boolean
         default: false
 
@@ -109,16 +109,31 @@ jobs:
     if: ${{ inputs.release && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: skgram/build.gradle.kts, sparse-checkout-cone-mode: false }
+      - name: Version
+        id: v
+        run: |
+          v=$(sed -n 's/^extra\["skgramVersion"\] = "\(.*\)"/\1/p' build.gradle.kts)
+          echo "tag=skgram-v$v" >> "$GITHUB_OUTPUT"
+          if gh release view "skgram-v$v" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release skgram-v$v already exists; bump skgramVersion to publish a new one."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/download-artifact@v4
+        if: steps.v.outputs.exists != 'true'
         with: { path: files, pattern: skgram-*, merge-multiple: true }
       - name: Publish release
+        if: steps.v.outputs.exists != 'true'
         working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
           ls -la files
-          gh release create "$TAG" files/* --repo "$GITHUB_REPOSITORY" --title "SKGram ${TAG#skgram-v}" --notes-file - <<'NOTES'
+          gh release create "$TAG" files/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "SKGram ${TAG#skgram-v}" --notes-file - <<'NOTES'
           ## 下载哪个？
 
           | 设备 | 文件 |

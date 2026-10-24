@@ -1,4 +1,6 @@
-# 推送 skgram/ 下的改动或手动运行：构建全平台安装包，作为 Artifacts 上传（不发布）。
+# 推送 skgram/ 下的改动或手动运行：构建全平台安装包（APK、EXE/MSI、DMG、AppImage/DEB）并上传为 Artifacts；
+# 如果 skgram/build.gradle.kts 里的版本号还没有对应的 Release，就创建 skgram-v<版本号> 标签并发布。
+# 要发布新版本：改 skgramVersion（和 skgramVersionCode）后推送。
 name: SKGram
 
 on:
@@ -9,7 +11,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: skgram-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     uses: ./.github/workflows/skgram-build.yml
     secrets: inherit
+    with:
+      release: true
