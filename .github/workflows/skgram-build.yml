@@ -36,17 +36,24 @@ jobs:
       - name: Release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.SKGRAM_KEYSTORE_BASE64 }}
-        if: env.KEYSTORE_BASE64 != ''
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/skgram.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/skgram.jks"
+          else
+            # No key configured: sign with a throwaway key so the APK still installs.
+            # (Updates then can't install over each other; set the secrets for a stable key.)
+            keytool -genkeypair -keystore "$RUNNER_TEMP/skgram.jks" -storepass skgram-ci -keypass skgram-ci \
+              -alias skgram -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=SKGram CI" > /dev/null
+            { echo "SKGRAM_KEYSTORE_PASSWORD=skgram-ci"; echo "SKGRAM_KEY_ALIAS=skgram"; echo "SKGRAM_KEY_PASSWORD=skgram-ci"; } >> "$GITHUB_ENV"
+          fi
           echo "SKGRAM_KEYSTORE=$RUNNER_TEMP/skgram.jks" >> "$GITHUB_ENV"
       - name: Build APKs
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          SKGRAM_KEYSTORE_PASSWORD: ${{ secrets.SKGRAM_KEYSTORE_PASSWORD }}
-          SKGRAM_KEY_ALIAS: ${{ secrets.SKGRAM_KEY_ALIAS }}
-          SKGRAM_KEY_PASSWORD: ${{ secrets.SKGRAM_KEY_PASSWORD }}
+          SKGRAM_KEYSTORE_PASSWORD: ${{ secrets.SKGRAM_KEYSTORE_PASSWORD || env.SKGRAM_KEYSTORE_PASSWORD }}
+          SKGRAM_KEY_ALIAS: ${{ secrets.SKGRAM_KEY_ALIAS || env.SKGRAM_KEY_ALIAS }}
+          SKGRAM_KEY_PASSWORD: ${{ secrets.SKGRAM_KEY_PASSWORD || env.SKGRAM_KEY_PASSWORD }}
         run: |
           ./gradlew :androidApp:assembleRelease
           v=$(./gradlew -q :printVersion)
