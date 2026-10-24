@@ -1,5 +1,5 @@
 # 推送 skgram/ 下的改动或手动运行：构建全平台安装包（APK、EXE/MSI、DMG、AppImage/DEB）并上传为 Artifacts；
-# 如果 skgram/build.gradle.kts 里的版本号还没有对应的 Release，就创建 skgram-v<版本号> 标签并发布。
+# 然后发布到 Release skgram-v<版本号>（版本号取自 skgram/build.gradle.kts；已存在就替换其中的文件）。
 # 要发布新版本：改 skgramVersion（和 skgramVersionCode）后推送。
 name: SKGram
 

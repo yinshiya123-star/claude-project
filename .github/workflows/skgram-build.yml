@@ -32,7 +32,10 @@ jobs:
         with: { distribution: temurin, java-version: "21" }
       - uses: gradle/actions/setup-gradle@v4
       - name: Install Android platform 37
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" > /dev/null
+        run: |
+          set +o pipefail  # `yes` dies of a broken pipe once sdkmanager is done
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" > /dev/null
+          test -d "$ANDROID_HOME/platforms/android-37.0"
       - name: Release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.SKGRAM_KEYSTORE_BASE64 }}
@@ -124,14 +127,20 @@ jobs:
           v=$(sed -n 's/^extra\["skgramVersion"\] = "\(.*\)"/\1/p' build.gradle.kts)
           echo "tag=skgram-v$v" >> "$GITHUB_OUTPUT"
           if gh release view "skgram-v$v" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "Release skgram-v$v already exists; bump skgramVersion to publish a new one."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/download-artifact@v4
-        if: steps.v.outputs.exists != 'true'
         with: { path: files, pattern: skgram-*, merge-multiple: true }
+      - name: Update existing release
+        # Same version built again (e.g. after a fix): replace its files with the new ones.
+        if: steps.v.outputs.exists == 'true'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: gh release upload "$TAG" files/* --repo "$GITHUB_REPOSITORY" --clobber
       - name: Publish release
         if: steps.v.outputs.exists != 'true'
         working-directory: .
