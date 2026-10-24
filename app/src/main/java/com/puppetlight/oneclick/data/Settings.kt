@@ -54,6 +54,13 @@ class Settings(context: Context) {
         get() = sp.getString("activeScript", ScriptRepository.BUILTIN_ID)!!
         set(v) = sp.edit { putString("activeScript", v) }
 
+    /** 控制方式："a11y" 无障碍，"shizuku" Shizuku(adb) */
+    var controlMode: String
+        get() = sp.getString("controlMode", MODE_A11Y)!!
+        set(v) = sp.edit { putString("controlMode", v) }
+
+    val useShizuku: Boolean get() = controlMode == MODE_SHIZUKU
+
     var guideShown: Boolean
         get() = sp.getBoolean("guideShown", false)
         set(v) = sp.edit { putBoolean("guideShown", v) }
@@ -64,6 +71,8 @@ class Settings(context: Context) {
     }
 
     companion object {
+        const val MODE_A11Y = "a11y"
+        const val MODE_SHIZUKU = "shizuku"
         const val DEFAULT_LIGHT_COLOR = "#FFA040"
         const val DEFAULT_KEYFRAME_TIME = 1.5f
         const val DEFAULT_SHAKE = 0.3f

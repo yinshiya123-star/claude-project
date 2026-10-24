@@ -1,6 +1,7 @@
 package com.puppetlight.oneclick.record
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.PixelFormat
 import android.view.Gravity
 import android.view.MotionEvent
@@ -10,9 +11,8 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.TextView
 import com.puppetlight.oneclick.R
-import com.puppetlight.oneclick.engine.GestureHelper
+import com.puppetlight.oneclick.engine.Device
 import com.puppetlight.oneclick.service.OverlayWindow
-import com.puppetlight.oneclick.service.PuppetAccessibilityService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,24 +23,29 @@ import kotlin.math.hypot
 
 /**
  * 录制面板悬浮窗。
- * 普通控件的点击会被自动记录；预览画面/时间轴这类自绘区域没有无障碍信息，
+ * 无障碍模式：普通控件的点击会被自动记录；预览画面/时间轴这类自绘区域没有无障碍信息，
  * 需先点「坐标点击」或「拖动」，再在屏幕上操作一次，App 记录坐标后会替你把这次操作执行到底层 App。
+ * Shizuku 模式：所有触摸都会被自动记录，不需要这两个按钮。
  */
 class RecordOverlay(
-    private val service: PuppetAccessibilityService,
+    windowContext: Context,
     private val recorder: Recorder,
-) : OverlayWindow(service, R.layout.overlay_record) {
+    private val device: Device,
+    private val captureButtons: Boolean,
+    private val currentPackage: () -> String?,
+    private val onReplay: (Long) -> Unit,
+) : OverlayWindow(windowContext, R.layout.overlay_record) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val tvCount: TextView = view.findViewById(R.id.tvCount)
     private val tvLast: TextView = view.findViewById(R.id.tvLast)
     private val btnPause: Button = view.findViewById(R.id.btnRecPause)
     private var captureLayer: View? = null
-    private val size = service.screenSize()
-    private val gestures = GestureHelper(service, size.x, size.y) { setPassThrough(it) }
+    private var hint: String? = null
 
     init {
         makeDraggable(view.findViewById(R.id.recHeader))
+        view.findViewById<View>(R.id.rowCapture).visibility = if (captureButtons) View.VISIBLE else View.GONE
         view.findViewById<View>(R.id.btnRecTap).setOnClickListener { startCapture(drag = false) }
         view.findViewById<View>(R.id.btnRecDrag).setOnClickListener { startCapture(drag = true) }
         view.findViewById<View>(R.id.btnRecWait).setOnClickListener { recorder.addWait(2000) }
@@ -49,15 +54,19 @@ class RecordOverlay(
             recorder.paused = !recorder.paused
             render()
         }
-        view.findViewById<View>(R.id.btnRecSave).setOnClickListener { service.stopRecording(save = true) }
-        view.findViewById<View>(R.id.btnRecCancel).setOnClickListener { service.stopRecording(save = false) }
-        recorder.onChanged = { scope.launch { render() } }
+        view.findViewById<View>(R.id.btnRecSave).setOnClickListener { RecordController.stop(save = true) }
+        view.findViewById<View>(R.id.btnRecCancel).setOnClickListener { RecordController.stop(save = false) }
+        recorder.onChanged = { scope.launch { hint = null; render() } }
         render()
+    }
+
+    fun showHint(text: String) {
+        scope.launch { hint = text; render() }
     }
 
     private fun render() {
         tvCount.text = if (recorder.paused) "⏸ 录制已暂停 · ${recorder.count} 步" else "● 录制中 · ${recorder.count} 步"
-        tvLast.text = recorder.lastDesc.ifEmpty { "去 NV MAX / Motion Ninja 操作一遍吧" }
+        tvLast.text = hint ?: recorder.lastDesc.ifEmpty { "去 NV MAX / Motion Ninja 操作一遍吧" }
         btnPause.text = if (recorder.paused) "继续" else "暂停"
     }
 
@@ -75,9 +84,9 @@ class RecordOverlay(
     @SuppressLint("ClickableViewAccessibility")
     private fun startCapture(drag: Boolean) {
         if (captureLayer != null) return
-        val layer = FrameLayout(service).apply {
+        val layer = FrameLayout(context).apply {
             setBackgroundColor(0x33FF9800)
-            addView(TextView(service).apply {
+            addView(TextView(context).apply {
                 text = if (drag) "按住要拖动的位置，拖到目标处再松手" else "点击要记录的位置（长按 = 记录长按）"
                 setTextColor(0xFFFFFFFF.toInt())
                 setBackgroundColor(0xCC000000.toInt())
@@ -103,15 +112,18 @@ class RecordOverlay(
                     removeCapture()
                     scope.launch {
                         delay(150)
+                        val pkg = currentPackage()
                         if (dist < dp(16)) {
                             val long = total > 500
-                            recorder.addTap(downX, downY, long)
-                            if (long) gestures.longPress(downX, downY) else gestures.tap(downX, downY)
+                            recorder.addTap(pkg, downX, downY, long)
+                            onReplay(2000)
+                            if (long) device.longPress(downX, downY) else device.tap(downX, downY)
                         } else {
                             val hold = if (moveStartT > 0) moveStartT - downT else 300
                             val dur = if (moveStartT > 0) e.eventTime - moveStartT else 600
-                            recorder.addDrag(downX, downY, upX, upY, hold, dur)
-                            gestures.drag(downX, downY, upX, upY, hold.coerceIn(100, 2000), dur.coerceIn(200, 3000), 200)
+                            recorder.addDrag(pkg, downX, downY, upX, upY, hold, dur)
+                            onReplay(hold + dur + 2000)
+                            device.drag(downX, downY, upX, upY, hold.coerceIn(100, 2000), dur.coerceIn(200, 3000), 200)
                         }
                     }
                 }

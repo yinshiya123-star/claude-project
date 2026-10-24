@@ -31,6 +31,7 @@ android {
     }
     buildFeatures {
         buildConfig = true
+        aidl = true
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
@@ -43,6 +44,8 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

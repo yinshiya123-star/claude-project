@@ -1,10 +1,12 @@
 package com.puppetlight.oneclick.service
 
+import android.content.Context
 import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.puppetlight.oneclick.R
+import com.puppetlight.oneclick.engine.RunController
 import com.puppetlight.oneclick.engine.RunState
 import com.puppetlight.oneclick.engine.ScriptEngine
 import kotlinx.coroutines.CoroutineScope
@@ -14,7 +16,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /** 运行时悬浮窗：显示当前第几步、状态，可暂停/继续/停止，出错时可重试/跳过。 */
-class RunOverlay(private val service: PuppetAccessibilityService) : OverlayWindow(service, R.layout.overlay_run) {
+class RunOverlay(context: Context) : OverlayWindow(context, R.layout.overlay_run) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val tvProgress: TextView = view.findViewById(R.id.tvProgress)
@@ -35,14 +37,14 @@ class RunOverlay(private val service: PuppetAccessibilityService) : OverlayWindo
             body.visibility = if (body.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
         btnPause.setOnClickListener {
-            val e = service.engine ?: return@setOnClickListener
+            val e = RunController.engine ?: return@setOnClickListener
             if (e.isPaused) e.resume() else e.pause()
         }
-        btnStop.setOnClickListener { service.stopRun() }
-        view.findViewById<View>(R.id.btnRetry).setOnClickListener { service.engine?.decide(ScriptEngine.Decision.RETRY) }
-        view.findViewById<View>(R.id.btnSkip).setOnClickListener { service.engine?.decide(ScriptEngine.Decision.SKIP) }
-        view.findViewById<View>(R.id.btnErrStop).setOnClickListener { service.stopRun() }
-        btnClose.setOnClickListener { service.closeOverlay() }
+        btnStop.setOnClickListener { RunController.stop() }
+        view.findViewById<View>(R.id.btnRetry).setOnClickListener { RunController.engine?.decide(ScriptEngine.Decision.RETRY) }
+        view.findViewById<View>(R.id.btnSkip).setOnClickListener { RunController.engine?.decide(ScriptEngine.Decision.SKIP) }
+        view.findViewById<View>(R.id.btnErrStop).setOnClickListener { RunController.stop() }
+        btnClose.setOnClickListener { RunController.closeOverlay() }
     }
 
     override fun show() {

@@ -4,6 +4,23 @@ Android App（Kotlin，最低 Android 8.0 / API 26）。通过 **无障碍服务
 
 用户只需要：选背景图 → 选绿幕素材 → 点「一键制作」。
 
+## 两种控制方式
+
+主界面顶部可切换：
+
+| | 无障碍模式 | Shizuku 模式（adb 权限） |
+|---|---|---|
+| 需要 | 开启无障碍服务 | 安装 [Shizuku](https://shizuku.rikka.app/zh-hans/download/)，用「无线调试」激活；悬浮窗权限 |
+| 系统版本 | Android 8+ | Android 11+（或用电脑 USB 激活） |
+| 查找控件 | AccessibilityNodeInfo | `uiautomator dump` |
+| 点击/拖动/缩放 | dispatchGesture | shell 进程直接注入触摸事件（失败时退回 `input` 命令） |
+| 输入文字 | ACTION_SET_TEXT | 全选 + `input text`；中文用剪贴板 + 粘贴键 |
+| 截图检测 | 无障碍截图 / 录屏授权 | `screencap` |
+| 录制 | 无障碍点击事件 + 手动坐标 | `getevent` 读取每次触摸 + 匹配被点的控件 |
+| 注意 | 小米等系统可能清理后台、拦截后台打开 App | 小米需在开发者选项打开「USB 调试（安全设置）」；手机重启后要在 Shizuku 里重新启动 |
+
+两种模式使用同一套 JSON 步骤脚本。Shizuku 模式下，如果 App 的预览画面一直在动，`uiautomator dump` 可能拿不到控件，这时会使用脚本里的坐标兜底。
+
 ## 下载
 
 - 编译好的 APK：[`release/一键木偶打光-v1.0.0.apk`](release/)（debug 签名，可直接安装）
@@ -52,9 +69,12 @@ app/src/main/java/com/puppetlight/oneclick/
 │              ScriptManagerActivity（脚本管理/录制入口/日志）、ScriptEditorActivity（JSON 编辑）
 ├── service/   PuppetAccessibilityService（无障碍服务）、RunOverlay（进度悬浮窗）、
 │              ProjectionService（Android 8~10 截图）、Notifier（通知）
-├── engine/    ScriptEngine（执行/重试/暂停）、NodeFinder（控件查找）、GestureHelper（手势）、
-│              ScreenCapture（截图 + 绿色残留检测）、RunState（状态/日志）
-├── record/    Recorder（录制生成脚本）、RecordOverlay（录制面板）
+├── engine/    ScriptEngine（执行/重试/暂停）、RunController（运行管理）、Device 接口：
+│              A11yDevice（无障碍）/ ShizukuDevice（adb）；UiNode/NodeQuery（控件匹配）、
+│              UiDumpParser、GestureHelper、ScreenCapture（截图 + 绿色残留检测）、RunState（状态/日志）
+├── shizuku/   ShizukuManager（状态/授权/绑定）、ShellService（以 shell 身份运行：执行命令、注入触摸）
+├── record/    Recorder（生成脚本）、A11yRecordSource / ShizukuRecordSource（两种录制来源）、
+│              RecordOverlay（录制面板）、RecordController
 ├── script/    Script/ScriptParser（解析、宏展开、校验）、Target（控件定位）、Expr（变量/表达式）
 └── data/      Settings、AppDetector（检测已安装 App）、MediaHelper（相册读写/查找导出视频）、ScriptRepository
 ```
@@ -74,7 +94,8 @@ app/src/main/java/com/puppetlight/oneclick/
 
 | 权限 | 用途 |
 |---|---|
-| 无障碍服务 | 自动点击/滑动/输入、录制操作、Android 11+ 截图检测 |
+| 无障碍服务（无障碍模式） | 自动点击/滑动/输入、录制操作、Android 11+ 截图检测 |
+| Shizuku（Shizuku 模式） | 以 adb 身份执行 uiautomator / screencap / getevent、注入触摸和按键 |
 | 悬浮窗 | 进度悬浮窗（默认用无障碍悬浮窗，未授权时也可运行） |
 | 照片和视频 | 把素材放进相册、查找导出的视频 |
 | 通知 | 「制作完成」提醒 |

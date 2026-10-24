@@ -24,18 +24,24 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
 import com.puppetlight.oneclick.R
 import com.puppetlight.oneclick.data.AppDetector
 import com.puppetlight.oneclick.data.MediaHelper
 import com.puppetlight.oneclick.data.ScriptRepository
 import com.puppetlight.oneclick.data.Settings as AppSettings
+import com.puppetlight.oneclick.engine.A11yDevice
+import com.puppetlight.oneclick.engine.RunController
 import com.puppetlight.oneclick.engine.RunState
+import com.puppetlight.oneclick.engine.ShizukuDevice
 import com.puppetlight.oneclick.service.KeepAliveService
 import com.puppetlight.oneclick.service.ProjectionService
 import com.puppetlight.oneclick.service.PuppetAccessibilityService
+import com.puppetlight.oneclick.shizuku.ShizukuManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import rikka.shizuku.Shizuku
 
 class MainActivity : AppCompatActivity() {
 
@@ -103,8 +109,28 @@ class MainActivity : AppCompatActivity() {
         findViewById<android.view.View>(R.id.btnScripts).setOnClickListener {
             startActivity(Intent(this, ScriptManagerActivity::class.java))
         }
+        val modeGroup = findViewById<MaterialButtonToggleGroup>(R.id.modeGroup)
+        modeGroup.check(if (settings.useShizuku) R.id.btnModeShizuku else R.id.btnModeA11y)
+        modeGroup.addOnButtonCheckedListener { _, id, checked ->
+            if (!checked) return@addOnButtonCheckedListener
+            settings.controlMode = if (id == R.id.btnModeShizuku) AppSettings.MODE_SHIZUKU else AppSettings.MODE_A11Y
+            renderStatus()
+            if (settings.useShizuku && ShizukuManager.status(this) != ShizukuManager.Status.READY) showShizukuGuide()
+        }
+        // Shizuku 的 binder 是异步送达的，收到/断开时刷新状态
+        Shizuku.addBinderReceivedListenerSticky(binderReceived)
+        Shizuku.addBinderDeadListener(binderDead)
         renderMaterials()
         if (!settings.guideShown) showFirstGuide()
+    }
+
+    private val binderReceived = Shizuku.OnBinderReceivedListener { runOnUiThread { renderStatus() } }
+    private val binderDead = Shizuku.OnBinderDeadListener { runOnUiThread { renderStatus() } }
+
+    override fun onDestroy() {
+        Shizuku.removeBinderReceivedListener(binderReceived)
+        Shizuku.removeBinderDeadListener(binderDead)
+        super.onDestroy()
     }
 
     override fun onResume() {
@@ -178,10 +204,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderStatus() {
         statusList.removeAllViews()
-        val a11y = PuppetAccessibilityService.isEnabled(this)
-        addStatusRow("无障碍服务", a11y, if (a11y) "已开启" else "未开启（必需）", "去开启") { openAccessibilitySettings() }
         val overlay = Settings.canDrawOverlays(this)
-        addStatusRow("悬浮窗权限", overlay, if (overlay) "已开启" else "未开启（推荐）", "去开启") { openOverlaySettings() }
+        if (settings.useShizuku) {
+            val st = ShizukuManager.status(this)
+            addStatusRow("Shizuku", st == ShizukuManager.Status.READY, st.text,
+                if (st == ShizukuManager.Status.NO_PERMISSION) "授权" else "设置") { onShizukuAction(st) }
+            addStatusRow("悬浮窗权限", overlay, if (overlay) "已开启" else "未开启（必需）", "去开启") { openOverlaySettings() }
+        } else {
+            val a11y = PuppetAccessibilityService.isEnabled(this)
+            addStatusRow("无障碍服务", a11y, if (a11y) "已开启" else "未开启（必需）", "去开启") { openAccessibilitySettings() }
+            addStatusRow("悬浮窗权限", overlay, if (overlay) "已开启" else "未开启（推荐）", "去开启") { openOverlaySettings() }
+        }
         for (app in listOf(AppDetector.NV_MAX, AppDetector.MOTION_NINJA)) {
             val pkg = AppDetector.findPackage(this, app)
             addStatusRow(app.displayName, pkg != null, pkg ?: "未安装", "去下载") { AppDetector.openStore(this, app) }
@@ -239,9 +272,46 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun onShizukuAction(st: ShizukuManager.Status) {
+        when (st) {
+            ShizukuManager.Status.NO_PERMISSION -> ShizukuManager.requestPermission { ok ->
+                runOnUiThread {
+                    renderStatus()
+                    if (!ok) Toast.makeText(this, "未授权 Shizuku", Toast.LENGTH_SHORT).show()
+                }
+            }
+            else -> showShizukuGuide()
+        }
+    }
+
+    private fun showShizukuGuide() {
+        val st = ShizukuManager.status(this)
+        AlertDialog.Builder(this)
+            .setTitle("Shizuku 模式设置（当前：${st.text}）")
+            .setMessage(
+                "Shizuku 模式不需要无障碍，用 adb 权限操作手机。需要 Android 11 及以上（或用电脑 USB 激活）。\n\n" +
+                    "1. 安装 Shizuku（点下方「打开/下载 Shizuku」）\n\n" +
+                    "2. 打开开发者选项：设置 → 我的设备 → 全部参数 → 连点「MIUI/OS 版本」7 次\n\n" +
+                    "3. 设置 → 更多设置 → 开发者选项，打开：\n" +
+                    "   • USB 调试\n" +
+                    "   • USB 调试（安全设置）← 小米必须开，否则无法模拟点击\n" +
+                    "   • 无线调试\n\n" +
+                    "4. 打开 Shizuku → 「通过无线调试启动」→ 按提示配对 → 启动\n\n" +
+                    "5. 回到本 App，点 Shizuku 那一行的「授权」\n\n" +
+                    "注意：手机每次重启后，需要在 Shizuku 里重新点一次「启动」。"
+            )
+            .setPositiveButton("打开/下载 Shizuku") { _, _ -> ShizukuManager.openShizuku(this) }
+            .setNeutralButton("开发者选项") { _, _ ->
+                runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
+                    .onFailure { Toast.makeText(this, "请先连点版本号开启开发者选项", Toast.LENGTH_LONG).show() }
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
     /** 上次制作没有正常结束 → 进程被系统清理了，告诉用户原因和解决办法。 */
     private fun checkInterrupted() {
-        if (PuppetAccessibilityService.instance?.isRunning == true) return
+        if (RunController.isRunning) return
         if (!RunState.consumeInterrupted(this)) return
         val last = RunState.loadLastLog(this).lines().lastOrNull { it.contains("▶") }
             ?.substringAfter("▶")?.trim() ?: "开始阶段"
@@ -254,7 +324,7 @@ class MainActivity : AppCompatActivity() {
                     "2. 自启动 → 打开\n" +
                     "3. 其他权限 → 后台弹出界面、显示悬浮窗 → 允许\n" +
                     "4. 在最近任务里把本 App 加锁，不要上滑清理\n\n" +
-                    "然后把无障碍开关关掉再重新打开，再试一次。"
+                    (if (settings.useShizuku) "然后确认 Shizuku 仍在运行，再试一次。" else "然后把无障碍开关关掉再重新打开，再试一次。")
             )
             .setPositiveButton("去应用信息") { _, _ ->
                 startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
@@ -292,18 +362,32 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "请先选择背景图和绿幕素材", Toast.LENGTH_SHORT).show()
             return
         }
-        val service = PuppetAccessibilityService.instance
-        if (!PuppetAccessibilityService.isEnabled(this) || service == null) {
+        if (RunController.isRunning) {
+            Toast.makeText(this, "正在制作中，请查看悬浮窗", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (settings.useShizuku) {
+            val st = ShizukuManager.status(this)
+            if (st != ShizukuManager.Status.READY) {
+                if (st == ShizukuManager.Status.NO_PERMISSION) onShizukuAction(st) else showShizukuGuide()
+                return
+            }
+            if (!Settings.canDrawOverlays(this)) {
+                AlertDialog.Builder(this)
+                    .setTitle("需要悬浮窗权限")
+                    .setMessage("Shizuku 模式需要悬浮窗权限来显示制作进度和暂停/停止按钮。")
+                    .setPositiveButton("去开启") { _, _ -> openOverlaySettings() }
+                    .setNegativeButton("取消", null)
+                    .show()
+                return
+            }
+        } else if (!PuppetAccessibilityService.isEnabled(this) || PuppetAccessibilityService.instance == null) {
             AlertDialog.Builder(this)
                 .setTitle("需要开启无障碍服务")
                 .setMessage("自动操作 NV MAX 和 Motion Ninja 需要无障碍服务。请在设置中开启「一键木偶打光 · 自动操作」。\n\n若已开启仍提示此信息，请关闭后重新开启一次。")
                 .setPositiveButton("去开启") { _, _ -> openAccessibilitySettings() }
                 .setNegativeButton("取消", null)
                 .show()
-            return
-        }
-        if (service.isRunning) {
-            Toast.makeText(this, "正在制作中，请查看悬浮窗", Toast.LENGTH_SHORT).show()
             return
         }
         val missing = listOf(AppDetector.NV_MAX, AppDetector.MOTION_NINJA).filter { AppDetector.findPackage(this, it) == null }
@@ -325,7 +409,7 @@ class MainActivity : AppCompatActivity() {
             requestPerms.launch(needed.toTypedArray())
             return
         }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+        if (!settings.useShizuku && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             // Android 10 及以下：截图检测需要录屏授权
             val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             requestProjection.launch(mpm.createScreenCaptureIntent())
@@ -335,7 +419,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchRun() {
-        val service = PuppetAccessibilityService.instance ?: return
         val script = try {
             ScriptRepository(this).loadActive()
         } catch (e: Exception) {
@@ -343,11 +426,29 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val vars = buildVars()
-        if (service.startRun(script, vars)) {
-            KeepAliveService.start(this)
-            RunState.log("参数：${vars.filterKeys { !it.endsWith("Uri") }}")
-            Toast.makeText(this, "开始自动制作，请勿触碰屏幕", Toast.LENGTH_LONG).show()
+        if (settings.useShizuku) {
+            lifecycleScope.launch {
+                val shell = ShizukuManager.shell()
+                if (shell == null) {
+                    AlertDialog.Builder(this@MainActivity).setTitle("连接 Shizuku 失败")
+                        .setMessage("请打开 Shizuku 确认它正在运行，然后重试。").setPositiveButton("好", null).show()
+                    return@launch
+                }
+                val device = ShizukuDevice(applicationContext, shell)
+                started(RunController.start(applicationContext, device, script, vars), vars)
+            }
+        } else {
+            val service = PuppetAccessibilityService.instance ?: return
+            started(RunController.start(service, A11yDevice(service), script, vars), vars)
         }
+    }
+
+    private fun started(ok: Boolean, vars: Map<String, String>) {
+        if (!ok) return
+        KeepAliveService.start(this)
+        RunState.log("参数：${vars.filterKeys { !it.endsWith("Uri") }}")
+        Toast.makeText(this, "开始自动制作，请勿触碰屏幕", Toast.LENGTH_LONG).show()
+        moveTaskToBack(true)
     }
 
     private fun buildVars(): Map<String, String> {

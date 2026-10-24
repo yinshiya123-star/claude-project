@@ -17,6 +17,32 @@
             android:text="上传背景图和绿幕素材，点一下就自动用 NV MAX + Motion Ninja 做好木偶打光视频。"
             android:textAppearance="?attr/textAppearanceBodyMedium" />
 
+        <!-- 控制方式 -->
+        <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/modeGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnModeA11y"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="无障碍模式" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnModeShizuku"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Shizuku 模式" />
+        </com.google.android.material.button.MaterialButtonToggleGroup>
+
         <!-- 环境检查 -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/cardStatus"

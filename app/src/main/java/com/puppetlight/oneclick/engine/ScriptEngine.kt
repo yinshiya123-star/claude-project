@@ -1,12 +1,7 @@
 package com.puppetlight.oneclick.engine
 
-import android.accessibilityservice.AccessibilityService
-import android.content.Intent
-import android.graphics.Rect
+import android.content.Context
 import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.view.accessibility.AccessibilityNodeInfo
 import com.puppetlight.oneclick.data.MediaHelper
 import com.puppetlight.oneclick.script.ActionType
 import com.puppetlight.oneclick.script.Expr
@@ -15,7 +10,6 @@ import com.puppetlight.oneclick.script.ScriptParser
 import com.puppetlight.oneclick.script.Step
 import com.puppetlight.oneclick.script.Target
 import com.puppetlight.oneclick.service.Notifier
-import com.puppetlight.oneclick.service.PuppetAccessibilityService
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -29,9 +23,11 @@ class StepFailure(message: String) : Exception(message)
 /**
  * 脚本执行引擎：逐步执行，每步执行后等待 → 校验 → 失败自动重试，
  * 重试用尽后暂停并在悬浮窗提示，由用户选择「重试 / 跳过 / 停止」。
+ * 具体如何点击/查找控件由 [Device]（无障碍 或 Shizuku）实现。
  */
 class ScriptEngine(
-    private val service: PuppetAccessibilityService,
+    private val context: Context,
+    private val device: Device,
     private val script: Script,
     initialVars: Map<String, String>,
 ) {
@@ -42,10 +38,8 @@ class ScriptEngine(
         putAll(initialVars)
     }
     private val d = script.defaults
-    private val screenW = service.screenSize().x
-    private val screenH = service.screenSize().y
-    private val finder = NodeFinder(service)
-    private val gestures = GestureHelper(service, screenW, screenH) { service.overlay?.setPassThrough(it) }
+    private val screenW = device.screenW
+    private val screenH = device.screenH
 
     private val paused = MutableStateFlow(false)
     @Volatile private var pendingDecision: CompletableDeferred<Decision>? = null
@@ -103,7 +97,7 @@ class ScriptEngine(
     /** 返回 true 表示全部完成。 */
     suspend fun run(): Boolean {
         val steps = script.steps
-        RunState.log("开始执行脚本「${script.name}」 共 ${steps.size} 步，屏幕 ${screenW}x$screenH")
+        RunState.log("开始执行脚本「${script.name}」 共 ${steps.size} 步，方式：${device.name}，屏幕 ${screenW}x$screenH")
         for ((i, step) in steps.withIndex()) {
             awaitResume()
             RunState.update {
@@ -160,7 +154,7 @@ class ScriptEngine(
                     error = "第 $number 步「${Expr.substitute(step.desc, vars)}」失败：$error\n（已自动重试 $retries 次）",
                 )
             }
-            service.bringOverlayToFront()
+            withContext(Dispatchers.Main) { RunController.overlay?.bringToFront() }
             val decision = deferred.await()
             pendingDecision = null
             RunState.update { it.copy(status = RunState.Status.RUNNING, error = null) }
@@ -181,12 +175,12 @@ class ScriptEngine(
         o.optJSONObject("verify")?.let { v ->
             val t = Target.from(v, vars)!!
             status("校验：等待 ${t.describe()}")
-            finder.waitFind(t, o.optLong("verifyTimeoutMs", d.verifyTimeoutMs))
+            waitFind(t, o.optLong("verifyTimeoutMs", d.verifyTimeoutMs))
                 ?: throw StepFailure("执行后未检测到目标控件：${t.describe()}")
         }
         o.optJSONObject("verifyGone")?.let { v ->
             val t = Target.from(v, vars)!!
-            if (!finder.waitGone(t, o.optLong("verifyTimeoutMs", d.verifyTimeoutMs))) {
+            if (!waitGone(t, o.optLong("verifyTimeoutMs", d.verifyTimeoutMs))) {
                 throw StepFailure("执行后控件仍未消失：${t.describe()}")
             }
         }
@@ -197,6 +191,42 @@ class ScriptEngine(
         ActionType.WAIT_NEW_MEDIA, ActionType.GREEN_CHECK, ActionType.PREPARE_MEDIA -> 0
         ActionType.LAUNCH_APP -> 3000
         else -> d.waitMs
+    }
+
+    // ---------------------------------------------------------------- 查找
+
+    /** 轮询查找，直到超时；[t].scroll 为 true 时会尝试滚动列表。 */
+    private suspend fun waitFind(t: Target, timeoutMs: Long): UiNode? {
+        if (!t.hasSelector) return null
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var scrolls = 0
+        while (true) {
+            NodeQuery.findOne(device.snapshot(), t)?.let { return it }
+            if (System.currentTimeMillis() >= deadline) {
+                if (t.scroll && scrolls < 8 && device.scrollForward()) {
+                    scrolls++
+                    delay(500)
+                    continue
+                }
+                return null
+            }
+            delay(250)
+        }
+    }
+
+    private suspend fun waitGone(t: Target, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (NodeQuery.findOne(device.snapshot(), t) == null) return true
+            delay(250)
+        }
+        return false
+    }
+
+    private suspend fun locate(t: Target, timeoutMs: Long): UiNode? {
+        if (!t.hasSelector) return null
+        status("查找：${t.describe()}")
+        return waitFind(t, timeoutMs)
     }
 
     // ---------------------------------------------------------------- 各动作
@@ -212,13 +242,13 @@ class ScriptEngine(
             ActionType.SWIPE -> {
                 val (x1, y1) = point(o.getJSONObject("from"))
                 val (x2, y2) = point(o.getJSONObject("to"))
-                ok(gestures.swipe(x1, y1, x2, y2, num(o, "durationMs", 400.0).toLong()), "滑动手势被取消")
+                ok(device.swipe(x1, y1, x2, y2, num(o, "durationMs", 400.0).toLong()), "滑动手势被取消")
             }
             ActionType.DRAG -> {
                 val (x1, y1) = point(o.getJSONObject("from"))
                 val (x2, y2) = point(o.getJSONObject("to"))
                 ok(
-                    gestures.drag(
+                    device.drag(
                         x1, y1, x2, y2,
                         holdMs = num(o, "holdMs", 600.0).toLong(),
                         durationMs = num(o, "durationMs", 800.0).toLong(),
@@ -231,20 +261,20 @@ class ScriptEngine(
                 val (cx, cy) = point(c)
                 val span = num(o, "span", 0.3) * screenW
                 val scale = num(o, "scale", 1.2)
-                ok(gestures.pinch(cx, cy, span.toFloat(), (span * scale).toFloat(), num(o, "durationMs", 600.0).toLong()), "缩放手势被取消")
+                ok(device.pinch(cx, cy, span.toFloat(), (span * scale).toFloat(), num(o, "durationMs", 600.0).toLong()), "缩放手势被取消")
             }
             ActionType.TIMELINE_SEEK -> timelineSeek(o)
             ActionType.WAIT -> sleep(num(o, "ms", 1000.0).toLong())
             ActionType.WAIT_FOR -> {
                 val t = target(o, "target")
                 status("等待出现：${t.describe()}")
-                finder.waitFind(t, num(o, "timeoutMs", 15000.0).toLong())
+                waitFind(t, num(o, "timeoutMs", 15000.0).toLong())
                     ?: throw StepFailure("等待超时，未出现：${t.describe()}")
             }
-            ActionType.BACK -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            ActionType.HOME -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+            ActionType.BACK -> device.back()
+            ActionType.HOME -> device.home()
             ActionType.IME_ENTER -> imeEnter(o)
-            ActionType.PREPARE_MEDIA -> prepareMedia(o)
+            ActionType.PREPARE_MEDIA -> prepareMedia()
             ActionType.WAIT_NEW_MEDIA -> waitNewMedia(o)
             ActionType.GREEN_CHECK -> greenCheck(step)
             ActionType.SET_VAR -> {
@@ -256,7 +286,7 @@ class ScriptEngine(
             }
             ActionType.NOTIFY -> {
                 val uri = str(o, "openUri").takeIf { it.isNotEmpty() && !it.startsWith("\${") }?.let(Uri::parse)
-                Notifier.notifyDone(service, str(o, "title", "一键木偶打光"), str(o, "text", "制作完成"), uri)
+                Notifier.notifyDone(context, str(o, "title", "一键木偶打光"), str(o, "text", "制作完成"), uri)
             }
             ActionType.MACRO -> Unit // 解析阶段已展开
         }
@@ -293,10 +323,7 @@ class ScriptEngine(
         val t = Target.from(o, vars)!!
         var p: Pair<Float, Float>? = null
         if (t.hasSelector) {
-            finder.waitFind(t, o.optLong("findTimeoutMs", d.findTimeoutMs))?.let {
-                val b = finder.bounds(it)
-                p = b.exactCenterX() to b.exactCenterY()
-            }
+            waitFind(t, o.optLong("findTimeoutMs", d.findTimeoutMs))?.let { p = it.bounds.cx to it.bounds.cy }
         }
         if (p == null && t.hasPoint) p = px(t.x!!) to py(t.y!!)
         val r = p ?: throw StepFailure("找不到位置：${t.describe()}")
@@ -305,67 +332,54 @@ class ScriptEngine(
         return (r.first + dx.toFloat()) to (r.second + dy.toFloat())
     }
 
-    private suspend fun locate(t: Target, timeoutMs: Long): AccessibilityNodeInfo? {
-        if (!t.hasSelector) return null
-        status("查找：${t.describe()}")
-        return finder.waitFind(t, timeoutMs)
-    }
-
     private suspend fun click(o: JSONObject, long: Boolean) {
         val t = target(o, "target")
         val node = locate(t, o.optLong("findTimeoutMs", d.findTimeoutMs))
         if (node != null) {
-            if (!t.gesture) {
-                val c = finder.clickableAncestor(node)
-                val action = if (long) AccessibilityNodeInfo.ACTION_LONG_CLICK else AccessibilityNodeInfo.ACTION_CLICK
-                if (c != null && c.performAction(action)) {
-                    RunState.log("  控件${if (long) "长按" else "点击"}成功：${t.describe()}")
-                    return
-                }
+            val b = node.bounds
+            val okk = when {
+                !t.gesture -> device.clickNode(node, long)
+                long -> device.longPress(b.cx, b.cy)
+                else -> device.tap(b.cx, b.cy)
             }
-            val b = finder.bounds(node)
-            val okk = if (long) gestures.longPress(b.exactCenterX(), b.exactCenterY())
-            else gestures.tap(b.exactCenterX(), b.exactCenterY())
-            ok(okk, "手势点击被取消")
-            RunState.log("  手势点击控件中心 (${b.centerX()}, ${b.centerY()})")
+            ok(okk, "点击控件失败")
+            RunState.log("  ${if (long) "长按" else "点击"}控件：${t.describe()} @(${b.cx.toInt()}, ${b.cy.toInt()})")
             return
         }
         if (t.hasPoint) {
             val x = px(t.x!!); val y = py(t.y!!)
-            val okk = if (long) gestures.longPress(x, y) else gestures.tap(x, y)
-            ok(okk, "坐标点击被取消")
+            ok(if (long) device.longPress(x, y) else device.tap(x, y), "坐标点击被取消")
             RunState.log("  ${if (t.hasSelector) "未找到控件，" else ""}坐标点击 (${x.toInt()}, ${y.toInt()})")
             return
         }
         throw StepFailure("找不到控件：${t.describe()}")
     }
 
-    private suspend fun findInput(o: JSONObject): AccessibilityNodeInfo? {
+    private fun focusedInput(roots: List<UiNode>): UiNode? =
+        roots.asSequence().flatMap { it.walk() }.firstOrNull { it.editable && it.focused }
+
+    private fun firstEditable(roots: List<UiNode>): UiNode? =
+        roots.asSequence().flatMap { it.walk() }.firstOrNull { it.editable && it.visible }
+
+    /** 找输入框：目标控件 → 当前焦点 → 点坐标后的焦点 → 第一个输入框。 */
+    private suspend fun findInput(o: JSONObject): UiNode? {
         val t = Target.from(o.optJSONObject("target"), vars)
         if (t != null && t.hasSelector) {
             locate(t.copy(includeEditable = true), o.optLong("findTimeoutMs", d.findTimeoutMs))?.let { return it }
         }
-        finder.focusedInput()?.let { return it }
+        focusedInput(device.snapshot())?.let { return it }
         if (t != null && t.hasPoint) {
-            gestures.tap(px(t.x!!), py(t.y!!))
+            device.tap(px(t.x!!), py(t.y!!))
             sleep(700)
-            finder.focusedInput()?.let { return it }
+            focusedInput(device.snapshot())?.let { return it }
         }
-        return finder.firstEditable()
-    }
-
-    private fun setNodeText(node: AccessibilityNodeInfo, text: String): Boolean {
-        if (!node.isFocused) node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        }
-        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        return firstEditable(device.snapshot())
     }
 
     private suspend fun setText(o: JSONObject) {
         val text = str(o, "text")
         val node = findInput(o) ?: throw StepFailure("找不到输入框")
-        ok(setNodeText(node, text), "输入文字失败（ACTION_SET_TEXT 被拒绝）")
+        ok(device.setText(node, text), "输入文字失败")
         RunState.log("  输入：$text")
         if (o.optBoolean("imeEnter", false)) {
             sleep(300)
@@ -374,13 +388,10 @@ class ScriptEngine(
     }
 
     private suspend fun imeEnter(o: JSONObject) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val n = finder.focusedInput()
-            if (n != null && n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) return
-        }
+        if (device.imeEnter()) return
         val t = Target.from(o.optJSONObject("target"), vars)
         if (t != null && t.hasPoint) {
-            gestures.tap(px(t.x!!), py(t.y!!))
+            device.tap(px(t.x!!), py(t.y!!))
             return
         }
         RunState.log("  当前系统不支持输入法回车动作，已忽略")
@@ -388,8 +399,8 @@ class ScriptEngine(
 
     /**
      * 设置参数值。按 modes 顺序依次尝试：
-     * field  —— 标签旁的输入框，ACTION_SET_TEXT
-     * range  —— 标签旁的进度条，ACTION_SET_PROGRESS
+     * field  —— 标签旁的输入框
+     * range  —— 标签旁的进度条（仅无障碍模式，ACTION_SET_PROGRESS）
      * dialog —— 点击数值（或标签）弹出输入框后输入，再点确定
      * slider —— 用手势点/拖到滑块对应位置
      */
@@ -407,46 +418,34 @@ class ScriptEngine(
         for (mode in modes) {
             when (mode) {
                 "field" -> if (label != null) {
-                    val f = finder.nearby(label) { it.isEditable }
-                    if (f != null && setNodeText(f, text)) {
+                    val f = NodeQuery.nearby(label) { it.editable }
+                    if (f != null && device.setText(f, text)) {
                         RunState.log("  [输入框] ${labelT.describe()} = $text"); return
                     }
                 }
                 "range" -> if (label != null) {
-                    val r = finder.nearby(label) { it.rangeInfo != null }
-                    if (r != null) {
-                        val ri = r.rangeInfo
-                        val v = if (ri.max - ri.min == (max - min).toFloat()) value.toFloat()
-                        else ri.min + fraction.toFloat() * (ri.max - ri.min)
-                        val args = Bundle().apply {
-                            putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, v)
-                        }
-                        if (r.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id, args)) {
-                            RunState.log("  [进度条] ${labelT.describe()} = $v"); return
-                        }
+                    val r = NodeQuery.nearby(label) { it.hasRange }
+                    if (r != null && device.setProgress(r, value, min, max)) {
+                        RunState.log("  [进度条] ${labelT.describe()} = $text"); return
                     }
                 }
                 "dialog" -> {
                     val tapT = Target.from(o.optJSONObject("dialogTap"), vars)
                     val tapNode = tapT?.let { locate(it, 1500) } ?: label
                     val tapped = when {
-                        tapNode != null -> {
-                            val c = finder.clickableAncestor(tapNode)
-                            if (c?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) true
-                            else finder.bounds(tapNode).let { gestures.tap(it.exactCenterX(), it.exactCenterY()) }
-                        }
-                        tapT != null && tapT.hasPoint -> gestures.tap(px(tapT.x!!), py(tapT.y!!))
+                        tapNode != null -> device.clickNode(tapNode, false)
+                        tapT != null && tapT.hasPoint -> device.tap(px(tapT.x!!), py(tapT.y!!))
                         else -> false
                     }
                     if (tapped) {
                         sleep(800)
-                        val input = finder.focusedInput() ?: finder.firstEditable()
-                        if (input != null && setNodeText(input, text)) {
+                        val roots = device.snapshot()
+                        val input = focusedInput(roots) ?: firstEditable(roots)
+                        if (input != null && device.setText(input, text)) {
                             sleep(300)
                             val confirm = Target(texts = listOf("确定", "完成", "OK", "Done", "确认"), exact = true)
-                            finder.findOne(confirm)?.let { n ->
-                                (finder.clickableAncestor(n) ?: n).performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            } ?: imeEnter(JSONObject())
+                            NodeQuery.findOne(device.snapshot(), confirm)?.let { device.clickNode(it, false) }
+                                ?: imeEnter(JSONObject())
                             RunState.log("  [弹窗输入] = $text"); return
                         }
                     }
@@ -455,15 +454,16 @@ class ScriptEngine(
                     val x1 = px(num(s, "x1", 0.1)); val x2 = px(num(s, "x2", 0.9))
                     val y = when {
                         s.has("y") -> py(num(s, "y", 0.5))
-                        label != null -> finder.bounds(label).exactCenterY() + (num(s, "dy", 0.0) * screenH).toFloat()
+                        label != null -> label.bounds.cy + (num(s, "dy", 0.0) * screenH).toFloat()
                         else -> null
                     }
                     if (y != null) {
                         val x = x1 + (x2 - x1) * fraction.toFloat()
-                        val from = s.optString("from", "tap")
-                        val okk = if (from == "start") gestures.drag(x1, y, x, y, 200, 500, 200)
-                        else if (from == "end") gestures.drag(x2, y, x, y, 200, 500, 200)
-                        else gestures.drag(x, y, x + 1, y, 100, 100, 100)
+                        val okk = when (s.optString("from", "tap")) {
+                            "start" -> device.drag(x1, y, x, y, 200, 500, 200)
+                            "end" -> device.drag(x2, y, x, y, 200, 500, 200)
+                            else -> device.drag(x, y, x + 1, y, 100, 100, 100)
+                        }
                         if (okk) {
                             RunState.log("  [滑块手势] 拖到 ${(fraction * 100).toInt()}% (${x.toInt()}, ${y.toInt()})"); return
                         }
@@ -481,16 +481,15 @@ class ScriptEngine(
         val x1 = px(num(area, "x1", 0.15))
         val x2 = px(num(area, "x2", 0.85))
         val pps = num(o, "pxPerSecond", 0.15) * screenW
-        val mode = o.optString("mode", "drag")
         status("时间轴定位到 ${Expr.format(seconds)} 秒")
-        if (mode == "tap") {
+        if (o.optString("mode", "drag") == "tap") {
             val origin = px(num(o, "originX", 0.5))
-            ok(gestures.tap(origin + (seconds * pps).toFloat(), y), "点击时间轴失败")
+            ok(device.tap(origin + (seconds * pps).toFloat(), y), "点击时间轴失败")
             return
         }
         if (o.optBoolean("reset", true)) {
             repeat(o.optInt("resetSwipes", 3)) {
-                gestures.drag(x1, y, x2, y, 80, 250, 0)
+                device.drag(x1, y, x2, y, 80, 250, 0)
                 sleep(250)
             }
             sleep(400)
@@ -499,23 +498,23 @@ class ScriptEngine(
         val maxStep = (x2 - x1).toDouble()
         while (remaining > 1) {
             val dd = minOf(remaining, maxStep).toFloat()
-            ok(gestures.drag(x2, y, x2 - dd, y, 150, 900, 350), "拖动时间轴失败")
+            ok(device.drag(x2, y, x2 - dd, y, 150, 900, 350), "拖动时间轴失败")
             remaining -= dd
             sleep(300)
         }
         RunState.log("  时间轴定位 ${Expr.format(seconds)}s（${Expr.format(seconds * pps)}px）")
     }
 
-    private suspend fun prepareMedia(o: JSONObject) {
+    private suspend fun prepareMedia() {
         val bg = vars["backgroundUri"].orEmpty()
         val green = vars["greenUri"].orEmpty()
         if (bg.isEmpty() || green.isEmpty()) throw StepFailure("未选择背景图或绿幕素材")
         status("复制素材到相册…")
         withContext(Dispatchers.IO) {
             // 先背景后绿幕：相册里绿幕素材是最新第 1 项，背景图是第 2 项
-            vars["bgGalleryUri"] = MediaHelper.copyToGallery(service, Uri.parse(bg), MediaHelper.BG_PREFIX).toString()
+            vars["bgGalleryUri"] = MediaHelper.copyToGallery(context, Uri.parse(bg), MediaHelper.BG_PREFIX).toString()
             Thread.sleep(1100)
-            vars["greenGalleryUri"] = MediaHelper.copyToGallery(service, Uri.parse(green), MediaHelper.GREEN_PREFIX).toString()
+            vars["greenGalleryUri"] = MediaHelper.copyToGallery(context, Uri.parse(green), MediaHelper.GREEN_PREFIX).toString()
         }
         mediaCursorMs = System.currentTimeMillis()
         RunState.log("  素材已放入相册「${MediaHelper.ALBUM}」")
@@ -524,26 +523,19 @@ class ScriptEngine(
     private suspend fun waitNewMedia(o: JSONObject) {
         val timeout = num(o, "timeoutMs", 900_000.0).toLong()
         val item = MediaHelper.waitForNewVideo(
-            service, mediaCursorMs, timeout, num(o, "stableMs", 4000.0).toLong(), seenMedia,
+            context, mediaCursorMs, timeout, num(o, "stableMs", 4000.0).toLong(), seenMedia,
         ) { status(it) } ?: throw StepFailure("在 ${timeout / 1000} 秒内没有在相册/下载目录发现新导出的视频")
         seenMedia += item.uri
         mediaCursorMs = maxOf(mediaCursorMs, item.modifiedMs - 1000)
-        if (o.optBoolean("ensureInGallery", true)) MediaHelper.ensureInGallery(service, item)
+        if (o.optBoolean("ensureInGallery", true)) MediaHelper.ensureInGallery(context, item)
         o.optString("saveAs").takeIf { it.isNotEmpty() }?.let { vars[it] = item.uri.toString() }
         RunState.log("  找到导出视频：${item.name}（${item.size / 1024} KB）")
     }
 
     private suspend fun greenCheck(step: Step) {
         val o = step.json
-        val capturer = service.capturer()
-        if (capturer == null) {
-            if (o.optBoolean("skipIfUnavailable", true)) {
-                RunState.log("  无法截图（未授权），跳过绿色残留检测"); return
-            }
-            throw StepFailure("无法截图")
-        }
         val reg = o.optJSONObject("region") ?: JSONObject()
-        val region = Rect(
+        val region = android.graphics.Rect(
             px(num(reg, "x1", 0.0)).toInt(), py(num(reg, "y1", 0.1)).toInt(),
             px(num(reg, "x2", 1.0)).toInt(), py(num(reg, "y2", 0.45)).toInt(),
         )
@@ -552,7 +544,13 @@ class ScriptEngine(
         val fix = o.optJSONArray("fixSteps")?.let { ScriptParser.parseStepList(it, step.phase, "${step.id}.fix.") }.orEmpty()
         for (attempt in 1..maxAttempts) {
             status("截图检测残留绿色（第 $attempt 次）")
-            val bmp = service.captureWithoutOverlay(capturer) ?: throw StepFailure("截图失败")
+            val bmp = device.screenshot()
+            if (bmp == null) {
+                if (o.optBoolean("skipIfUnavailable", true)) {
+                    RunState.log("  无法截图（未授权），跳过绿色残留检测"); return
+                }
+                throw StepFailure("截图失败")
+            }
             val ratio = GreenDetector.greenRatio(bmp, region, null)
             bmp.recycle()
             RunState.log("  残留绿色占比 ${"%.3f".format(ratio * 100)}%（阈值 ${"%.3f".format(threshold * 100)}%）")
@@ -571,29 +569,21 @@ class ScriptEngine(
     private suspend fun launchApp(o: JSONObject) {
         val pkg = str(o, "package")
         if (pkg.isEmpty() || pkg.startsWith("\${")) throw StepFailure("未检测到要打开的 App（包名为空）")
-        val intent = service.packageManager.getLaunchIntentForPackage(pkg)
-            ?: throw StepFailure("未安装：$pkg")
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (o.optBoolean("freshStart", false)) intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
         val label = runCatching {
-            service.packageManager.getApplicationLabel(service.packageManager.getApplicationInfo(pkg, 0)).toString()
+            context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(pkg, 0)).toString()
         }.getOrDefault(pkg)
-        withContext(Dispatchers.Main) { service.startActivity(intent) }
+        if (!device.launch(pkg, o.optBoolean("freshStart", false))) throw StepFailure("未安装：$pkg")
         status("等待 $label 打开…")
         if (waitForeground(pkg, 6000)) return
 
         // MIUI/HyperOS 等系统会拦截「后台弹出界面」：回到桌面，像人一样点 App 图标
         RunState.log("  系统拦截了后台打开 $label，改为从桌面点击图标")
         status("从桌面点击「$label」图标…")
-        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+        device.home()
         sleep(1500)
-        val icon = finder.waitFind(Target(texts = listOf(label), exact = true, scroll = true), 3000)
+        val icon = waitFind(Target(texts = listOf(label), exact = true, scroll = true), 3000)
         if (icon != null) {
-            val c = finder.clickableAncestor(icon)
-            if (c?.performAction(AccessibilityNodeInfo.ACTION_CLICK) != true) {
-                val b = finder.bounds(icon)
-                gestures.tap(b.exactCenterX(), b.exactCenterY())
-            }
+            device.clickNode(icon, false)
             if (waitForeground(pkg, num(o, "timeoutMs", 15000.0).toLong())) return
         }
         throw StepFailure(
@@ -605,8 +595,8 @@ class ScriptEngine(
     private suspend fun waitForeground(pkg: String, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (finder.packageOnScreen(pkg)) return true
-            sleep(400)
+            if (device.isForeground(pkg)) return true
+            sleep(500)
         }
         return false
     }
